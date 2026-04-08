@@ -1,33 +1,21 @@
 import {Effect} from "effect"
 
-const getGitDiff = (): Effect.Effect<string, Error, never> =>
-  Effect.async((resolve) => {
-    const command = new Deno.Command("git",{
-      args: ["diff"],
+export const runGitCommand = (args: string[]): Effect.Effect<string, Error, never> =>
+Effect.tryPromise({
+  try: async () => {
+    const process = new Deno.Command("git", {
+      args,
       stdout: "piped",
       stderr: "piped",
-    })
-
-    command.output().then((output)=> {
-      const decoder = new TextDecoder()
-      if (output.code !== 0) {
-        const error = decoder.decode(output.stderr)
-        resolve(Effect.fail(new Error(`Error executing git diff: ${error.message}`)))
-        return
-      }
-      const stdout = decoder.decode(output.stdout)
-      resolve(Effect.succeed(stdout))
-    })
-  })
-
-
-Effect.runPromise(getGitDiff())
-  .then((diff) => {
-    console.log("Git Diff Output:")
-    console.log(diff)
-  })
-  .catch((error) => {
-    console.error("Error:", error.message)
-  })
-
-
+    });
+    const output = await process.output();
+    const decoder = new TextDecoder();
+    const stdout = decoder.decode(output.stdout);
+    const stderr = decoder.decode(output.stderr);
+    if (output.code !== 0) {
+      throw new Error(`${stderr}`);
+    }
+    return stdout;
+  },
+  catch: (error) => new Error(`Git failed: ${error}`),
+});
