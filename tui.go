@@ -6,14 +6,19 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
+func init() {
+	lipgloss.SetColorProfile(termenv.ANSI256)
+}
+
 var (
-	addedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))   // Green
-	removedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))   // Red
-	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")) // Cyan
-	contextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244")) // Gray
-	cursorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true) // Magenta
+	addedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))            // Green
+	removedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))            // Red
+	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00FFFF")) // Cyan
+	contextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))            // Gray
+	cursorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF00FF")).Bold(true) // Magenta
 )
 
 type model struct {
@@ -83,11 +88,11 @@ func (m model) View() string {
 			content := line.Content
 			switch line.Kind {
 			case "add":
-				s.WriteString(addedStyle.Render("+" + content) + "\n")
+				s.WriteString(addedStyle.Render("+"+content) + "\n")
 			case "remove":
-				s.WriteString(removedStyle.Render("-" + content) + "\n")
+				s.WriteString(removedStyle.Render("-"+content) + "\n")
 			default:
-				s.WriteString(contextStyle.Render(" " + content) + "\n")
+				s.WriteString(contextStyle.Render(" "+content) + "\n")
 			}
 		}
 	}
