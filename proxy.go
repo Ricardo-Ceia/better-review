@@ -59,14 +59,28 @@ func runProxy(args []string) error {
 	}()
 
 	// Read stdin and intercept Ctrl+O
-	buf := make([]byte, 1)
+	buf := make([]byte, 4096)
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil {
 			break
 		}
 		if n > 0 {
-			if buf[0] == 0x0F { // Ctrl+O
+			// Look for Ctrl+O (0x0F) in the buffer
+			ctrlOIndex := -1
+			for i := 0; i < n; i++ {
+				if buf[i] == 0x0F {
+					ctrlOIndex = i
+					break
+				}
+			}
+
+			if ctrlOIndex != -1 {
+				// Write anything before Ctrl+O
+				if ctrlOIndex > 0 {
+					_, _ = ptmx.Write(buf[:ctrlOIndex])
+				}
+
 				// Restore terminal to normal mode for the UI
 				term.Restore(int(os.Stdin.Fd()), oldState)
 
@@ -76,10 +90,19 @@ func runProxy(args []string) error {
 				// Give the terminal back to raw mode for opencode
 				oldState, _ = term.MakeRaw(int(os.Stdin.Fd()))
 
-				// Optional: print a newline or just redraw prompt
-				os.Stdout.Write([]byte("\r\n\033[36m[Better Review] Returned to opencode.\033[0m\r\n"))
+				// Force a redraw in opencode by simulating a window resize
+				// and injecting a Ctrl+L (Clear Screen / Redraw) to be safe
+				ch <- syscall.SIGWINCH
+				_, _ = ptmx.Write([]byte{0x0C}) // Send Ctrl+L to trigger a prompt redraw
+
+				// Write anything after Ctrl+O
+				if ctrlOIndex+1 < n {
+					_, _ = ptmx.Write(buf[ctrlOIndex+1 : n])
+				}
 				continue
 			}
+
+			// No Ctrl+O, write everything
 			_, _ = ptmx.Write(buf[:n])
 		}
 	}
