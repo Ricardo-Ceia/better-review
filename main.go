@@ -30,11 +30,12 @@ type Hunk struct {
 }
 
 type FileDiff struct {
-	OldPath  string
-	NewPath  string
-	Status   string
-	IsBinary bool
-	Hunks    []Hunk
+	OldPath      string
+	NewPath      string
+	Status       string
+	IsBinary     bool
+	Hunks        []Hunk
+	ReviewStatus ReviewStatus
 }
 
 // CollectGitDiff runs 'git diff' in the specified repository path and returns the raw output.

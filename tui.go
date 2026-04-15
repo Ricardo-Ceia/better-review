@@ -31,6 +31,9 @@ var (
 	badgeModStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff")).Bold(true) // Blue [M]
 	badgeDelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Bold(true) // Red [D]
 
+	badgeAccStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950")).Bold(true) // Green Check
+	badgeRejStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Bold(true) // Red Cross
+
 	activeItemStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#21262d")). // GitHub Dark Active Row
 			Foreground(lipgloss.Color("#c9d1d9")). // GitHub Dark Text
@@ -182,6 +185,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.focus == focusViewport {
 				m.viewport.LineDown(1)
 			}
+
+		case "y", "a":
+			if m.focus == focusSidebar {
+				f := &m.files[m.cursorFile]
+				if f.ReviewStatus != StatusAccepted {
+					AcceptFile(f)
+				}
+			}
+
+		case "n", "x":
+			if m.focus == focusSidebar {
+				f := &m.files[m.cursorFile]
+				if f.ReviewStatus != StatusRejected {
+					RejectFile(f)
+				}
+			}
+
+		case "u":
+			if m.focus == focusSidebar {
+				f := &m.files[m.cursorFile]
+				if f.ReviewStatus != StatusUnreviewed {
+					UnstageFile(f)
+				}
+			}
 		}
 	}
 
@@ -225,6 +252,12 @@ func (m model) View() string {
 			badge = badgeAddStyle.Render(" + ")
 		} else if f.Status == "deleted" {
 			badge = badgeDelStyle.Render(" - ")
+		}
+
+		if f.ReviewStatus == StatusAccepted {
+			badge = badgeAccStyle.Render(" ✓ ")
+		} else if f.ReviewStatus == StatusRejected {
+			badge = badgeRejStyle.Render(" ✗ ")
 		}
 
 		displayPath := f.NewPath
@@ -286,9 +319,9 @@ func (m model) View() string {
 		Bold(true).
 		Render(modeStr)
 
-	footerText := "↑/↓: select file | Enter: review | q: quit"
+	footerText := "↑/↓: select | Enter: review | y: accept | x: reject | u: undo | q: quit"
 	if m.focus == focusViewport {
-		footerText = "↑/↓: scroll code | Esc: back to files | q: quit"
+		footerText = "↑/↓: scroll | Esc: back to files | q: quit"
 	}
 
 	helpText := lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(" " + footerText)
