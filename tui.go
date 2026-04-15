@@ -228,7 +228,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.LineDown(1)
 			}
 
-		case "y", "a":
+		case "y":
 			if m.focus == focusSidebar {
 				f := &m.files[m.cursorFile]
 				if f.ReviewStatus != StatusAccepted {
@@ -245,7 +245,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-		case "n", "x":
+		case "x":
 			if m.focus == focusSidebar {
 				f := &m.files[m.cursorFile]
 				if f.ReviewStatus != StatusRejected {
