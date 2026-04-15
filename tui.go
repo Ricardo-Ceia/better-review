@@ -125,7 +125,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.focus = focusViewport
 			}
 
-		case "esc", "left":
+		case "esc":
 			if m.focus == focusViewport {
 				m.focus = focusSidebar
 			}
