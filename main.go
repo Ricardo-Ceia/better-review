@@ -21,12 +21,13 @@ type DiffLine struct {
 }
 
 type Hunk struct {
-	Header   string
-	OldStart int
-	OldCount int
-	NewStart int
-	NewCount int
-	Lines    []DiffLine
+	Header       string
+	OldStart     int
+	OldCount     int
+	NewStart     int
+	NewCount     int
+	Lines        []DiffLine
+	ReviewStatus ReviewStatus
 }
 
 type FileDiff struct {

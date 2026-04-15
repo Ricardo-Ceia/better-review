@@ -15,13 +15,14 @@ func init() {
 }
 
 var (
-	addedStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950"))                                                                      // GitHub/Vercel Green
-	addedPrefixStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ea043"))                                                                      // Dimmer Green for '+'
-	removedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149"))                                                                      // GitHub/Vercel Red
-	removedPrefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#da3633"))                                                                      // Dimmer Red for '-'
-	headerStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff")).PaddingLeft(2).PaddingRight(2).Background(lipgloss.Color("#161b22")) // Block for hunks
-	contextStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e"))                                                                      // Dimmer Gray
-	contextPrefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#484f58"))                                                                      // Very dim gray for ' '
+	addedStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950"))                                                                                 // GitHub/Vercel Green
+	addedPrefixStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ea043"))                                                                                 // Dimmer Green for '+'
+	removedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149"))                                                                                 // GitHub/Vercel Red
+	removedPrefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#da3633"))                                                                                 // Dimmer Red for '-'
+	headerStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff")).PaddingLeft(2).PaddingRight(2).Background(lipgloss.Color("#161b22"))            // Block for hunks
+	headerActiveStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#c9d1d9")).PaddingLeft(2).PaddingRight(2).Background(lipgloss.Color("#58a6ff")).Bold(true) // Block for active hunks
+	contextStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e"))                                                                                 // Dimmer Gray
+	contextPrefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#484f58"))                                                                                 // Very dim gray for ' '
 
 	gutterStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#484f58")).PaddingRight(1) // Line numbers
 	gutterAddStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ea043")).PaddingRight(1) // Added line numbers
@@ -71,6 +72,7 @@ const (
 type model struct {
 	files      []FileDiff
 	cursorFile int
+	cursorHunk int
 	ready      bool
 	viewport   viewport.Model
 	width      int
@@ -82,6 +84,7 @@ func initialModel(files []FileDiff) model {
 	return model{
 		files:      files,
 		cursorFile: 0,
+		cursorHunk: 0,
 		focus:      focusSidebar,
 	}
 }
@@ -97,9 +100,23 @@ func (m *model) renderDiff() string {
 	var s strings.Builder
 	currFile := m.files[m.cursorFile]
 
-	for _, hunk := range currFile.Hunks {
+	for hIndex, hunk := range currFile.Hunks {
 		// Render hunk header as a subtle block
-		s.WriteString("\n" + headerStyle.Render(hunk.Header) + "\n")
+		hStyle := headerStyle
+		if m.focus == focusViewport && m.cursorHunk == hIndex {
+			hStyle = headerActiveStyle
+		}
+
+		status := ""
+		if hunk.ReviewStatus == StatusAccepted {
+			status = "  [✓ Accepted]"
+			hStyle = hStyle.Copy().Foreground(lipgloss.Color("#3fb950"))
+		} else if hunk.ReviewStatus == StatusRejected {
+			status = "  [✗ Rejected]"
+			hStyle = hStyle.Copy().Foreground(lipgloss.Color("#f85149"))
+		}
+
+		s.WriteString("\n" + hStyle.Render(hunk.Header+status) + "\n")
 		for _, line := range hunk.Lines {
 
 			oldLineStr := "    "
@@ -157,11 +174,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.focus == focusSidebar {
 				m.focus = focusViewport
+				m.cursorHunk = 0
+				m.viewport.SetContent(m.renderDiff())
 			}
 
 		case "esc":
 			if m.focus == focusViewport {
 				m.focus = focusSidebar
+				m.cursorHunk = 0
+				m.viewport.SetContent(m.renderDiff())
+			}
+
+		case "tab":
+			if m.focus == focusViewport {
+				f := &m.files[m.cursorFile]
+				if len(f.Hunks) > 0 {
+					m.cursorHunk = (m.cursorHunk + 1) % len(f.Hunks)
+					m.viewport.SetContent(m.renderDiff())
+				}
+			}
+
+		case "shift+tab":
+			if m.focus == focusViewport {
+				f := &m.files[m.cursorFile]
+				if len(f.Hunks) > 0 {
+					m.cursorHunk--
+					if m.cursorHunk < 0 {
+						m.cursorHunk = len(f.Hunks) - 1
+					}
+					m.viewport.SetContent(m.renderDiff())
+				}
 			}
 
 		case "up", "k":
@@ -192,6 +234,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if f.ReviewStatus != StatusAccepted {
 					AcceptFile(f)
 				}
+			} else if m.focus == focusViewport {
+				f := &m.files[m.cursorFile]
+				if len(f.Hunks) > 0 {
+					h := &f.Hunks[m.cursorHunk]
+					if h.ReviewStatus != StatusAccepted {
+						AcceptHunk(f, h)
+						m.viewport.SetContent(m.renderDiff())
+					}
+				}
 			}
 
 		case "n", "x":
@@ -199,6 +250,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				f := &m.files[m.cursorFile]
 				if f.ReviewStatus != StatusRejected {
 					RejectFile(f)
+				}
+			} else if m.focus == focusViewport {
+				f := &m.files[m.cursorFile]
+				if len(f.Hunks) > 0 {
+					h := &f.Hunks[m.cursorHunk]
+					if h.ReviewStatus != StatusRejected {
+						RejectHunk(f, h)
+						m.viewport.SetContent(m.renderDiff())
+					}
 				}
 			}
 
@@ -321,7 +381,7 @@ func (m model) View() string {
 
 	footerText := "↑/↓: select | Enter: review | y: accept | x: reject | u: undo | q: quit"
 	if m.focus == focusViewport {
-		footerText = "↑/↓: scroll | Esc: back to files | q: quit"
+		footerText = "↑/↓: scroll | Tab: next hunk | y: accept hunk | x: reject hunk | Esc: back | q: quit"
 	}
 
 	helpText := lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(" " + footerText)
