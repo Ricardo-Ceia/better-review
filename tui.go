@@ -15,10 +15,13 @@ func init() {
 }
 
 var (
-	addedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950")) // GitHub/Vercel Green
-	removedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")) // GitHub/Vercel Red
-	headerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff")) // Muted Blue for hunks
-	contextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")) // Dimmer Gray
+	addedStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950"))                                                                      // GitHub/Vercel Green
+	addedPrefixStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#2ea043"))                                                                      // Dimmer Green for '+'
+	removedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149"))                                                                      // GitHub/Vercel Red
+	removedPrefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#da3633"))                                                                      // Dimmer Red for '-'
+	headerStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff")).PaddingLeft(2).PaddingRight(2).Background(lipgloss.Color("#161b22")) // Block for hunks
+	contextStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e"))                                                                      // Dimmer Gray
+	contextPrefixStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#484f58"))                                                                      // Very dim gray for ' '
 
 	activeItemStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#21262d")). // GitHub Dark Active Row
@@ -84,19 +87,19 @@ func (m *model) renderDiff() string {
 	currFile := m.files[m.cursorFile]
 
 	for _, hunk := range currFile.Hunks {
-		s.WriteString(headerStyle.Render(hunk.Header) + "\n")
+		// Render hunk header as a subtle block
+		s.WriteString("\n" + headerStyle.Render(hunk.Header) + "\n")
 		for _, line := range hunk.Lines {
 			content := line.Content
 			switch line.Kind {
 			case "add":
-				s.WriteString(addedStyle.Render("+ "+content) + "\n")
+				s.WriteString(addedPrefixStyle.Render("+ ") + addedStyle.Render(content) + "\n")
 			case "remove":
-				s.WriteString(removedStyle.Render("- "+content) + "\n")
+				s.WriteString(removedPrefixStyle.Render("- ") + removedStyle.Render(content) + "\n")
 			default:
-				s.WriteString(contextStyle.Render("  "+content) + "\n")
+				s.WriteString(contextPrefixStyle.Render("  ") + contextStyle.Render(content) + "\n")
 			}
 		}
-		s.WriteString("\n")
 	}
 	return s.String()
 }
