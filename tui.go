@@ -15,23 +15,36 @@ func init() {
 }
 
 var (
-	addedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))            // Green
-	removedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))            // Red
-	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00FFFF")) // Cyan
-	contextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))            // Gray
-	cursorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF00FF")).Bold(true) // Magenta
+	addedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950")) // GitHub/Vercel Green
+	removedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")) // GitHub/Vercel Red
+	headerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff")) // Muted Blue for hunks
+	contextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")) // Dimmer Gray
+
+	activeItemStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")). // GitHub Dark Active Row
+			Foreground(lipgloss.Color("#c9d1d9")). // GitHub Dark Text
+			Bold(true).
+			Width(30).
+			MaxWidth(30).
+			PaddingLeft(1)
+
+	inactiveItemStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#8b949e")). // Dimmer text for inactive
+				Width(30).
+				MaxWidth(30).
+				PaddingLeft(1)
 
 	sidebarStyleActive = lipgloss.NewStyle().
 				Border(lipgloss.NormalBorder(), false, true, false, false).
-				BorderForeground(lipgloss.Color("#00FFFF")). // Cyan
-				PaddingRight(2).
-				MarginRight(2)
+				BorderForeground(lipgloss.Color("#58a6ff")). // Subtle Blue
+				PaddingRight(1).
+				MarginRight(1)
 
 	sidebarStyleInactive = lipgloss.NewStyle().
 				Border(lipgloss.NormalBorder(), false, true, false, false).
-				BorderForeground(lipgloss.Color("#444444")). // Gray
-				PaddingRight(2).
-				MarginRight(2)
+				BorderForeground(lipgloss.Color("#30363d")). // Dark Gray
+				PaddingRight(1).
+				MarginRight(1)
 )
 
 type focusState int
@@ -70,19 +83,17 @@ func (m *model) renderDiff() string {
 	var s strings.Builder
 	currFile := m.files[m.cursorFile]
 
-	s.WriteString(headerStyle.Render(fmt.Sprintf("--- a/%s\n+++ b/%s\n\n", currFile.OldPath, currFile.NewPath)))
-
 	for _, hunk := range currFile.Hunks {
 		s.WriteString(headerStyle.Render(hunk.Header) + "\n")
 		for _, line := range hunk.Lines {
 			content := line.Content
 			switch line.Kind {
 			case "add":
-				s.WriteString(addedStyle.Render("+"+content) + "\n")
+				s.WriteString(addedStyle.Render("+ "+content) + "\n")
 			case "remove":
-				s.WriteString(removedStyle.Render("-"+content) + "\n")
+				s.WriteString(removedStyle.Render("- "+content) + "\n")
 			default:
-				s.WriteString(contextStyle.Render(" "+content) + "\n")
+				s.WriteString(contextStyle.Render("  "+content) + "\n")
 			}
 		}
 		s.WriteString("\n")
@@ -101,10 +112,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-		headerHeight := lipgloss.Height(headerStyle.Render("Better Review - Agentic Code Review\n\n"))
 		footerHeight := lipgloss.Height("\nPress ↑/↓ to navigate files, Enter to view diff, Esc to return, q to quit.")
-
-		verticalMarginHeight := headerHeight + footerHeight
+		verticalMarginHeight := footerHeight + 1 // Add 1 for the gap
 
 		if !m.ready {
 			m.viewport = viewport.New(m.width-35, m.height-verticalMarginHeight) // Assumes 35 chars for sidebar
@@ -170,22 +179,21 @@ func (m model) View() string {
 		return "No changes found.\nPress q to quit."
 	}
 
-	header := headerStyle.Render("Better Review - Agentic Code Review\n")
-
 	// Render Sidebar
 	var sidebar strings.Builder
+
+	// Add a subtle title to the sidebar instead of a global title
+	sidebar.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Bold(true).PaddingLeft(1).Render("FILES") + "\n\n")
+
 	for i, f := range m.files {
-		cursor := "  "
-		style := lipgloss.NewStyle().Width(30).MaxWidth(30)
+		style := inactiveItemStyle
 
 		if m.cursorFile == i {
 			if m.focus == focusSidebar {
-				cursor = "> "
-				style = style.Inherit(cursorStyle)
+				style = activeItemStyle
 			} else {
-				// Focused on viewport, but keep the file highlighted in gray
-				cursor = "  "
-				style = style.Inherit(lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")).Bold(true))
+				// Focused on viewport, keep background but dim text
+				style = activeItemStyle.Copy().Foreground(lipgloss.Color("#8b949e"))
 			}
 		}
 
@@ -195,7 +203,7 @@ func (m model) View() string {
 			displayPath = "..." + displayPath[len(displayPath)-25:]
 		}
 
-		sidebar.WriteString(style.Render(fmt.Sprintf("%s%s", cursor, displayPath)) + "\n")
+		sidebar.WriteString(style.Render(displayPath) + "\n")
 	}
 
 	var sidebarStr string
@@ -210,12 +218,31 @@ func (m model) View() string {
 	// Join them side-by-side
 	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, sidebarStr, diffView)
 
-	footerText := " [Sidebar] ↑/↓: change file | Enter: review file | q: quit"
+	statusBg := lipgloss.Color("#21262d")
+	statusFg := lipgloss.Color("#c9d1d9")
 	if m.focus == focusViewport {
-		footerText = " [Reviewing] ↑/↓: scroll file | Esc: back to file list | q: quit"
+		statusBg = lipgloss.Color("#58a6ff")
+		statusFg = lipgloss.Color("#0d1117")
 	}
 
-	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("#808080")).Render("\n" + footerText)
+	modeStr := " FILES "
+	if m.focus == focusViewport {
+		modeStr = " REVIEWING "
+	}
 
-	return fmt.Sprintf("%s\n%s\n%s", header, mainContent, footer)
+	pill := lipgloss.NewStyle().
+		Background(statusBg).
+		Foreground(statusFg).
+		Bold(true).
+		Render(modeStr)
+
+	footerText := "↑/↓: select file | Enter: review | q: quit"
+	if m.focus == focusViewport {
+		footerText = "↑/↓: scroll code | Esc: back to files | q: quit"
+	}
+
+	helpText := lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(" " + footerText)
+	footer := lipgloss.JoinHorizontal(lipgloss.Top, pill, helpText)
+
+	return fmt.Sprintf("\n%s\n\n%s", mainContent, footer)
 }
