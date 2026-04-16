@@ -48,7 +48,38 @@ func ParseGitDiff(diff string) ([]FileDiff, error) {
 			continue
 		}
 
-		if strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") {
+		if strings.HasPrefix(line, "new file mode ") {
+			currentFile.Status = "added"
+			continue
+		}
+
+		if strings.HasPrefix(line, "deleted file mode ") {
+			currentFile.Status = "deleted"
+			continue
+		}
+
+		if strings.HasPrefix(line, "--- ") {
+			path := normalizeDiffPath(strings.TrimPrefix(line, "--- "))
+			if path == "" {
+				currentFile.OldPath = ""
+				currentFile.Status = "added"
+			} else {
+				currentFile.OldPath = path
+			}
+			continue
+		}
+
+		if strings.HasPrefix(line, "+++ ") {
+			path := normalizeDiffPath(strings.TrimPrefix(line, "+++ "))
+			if path == "" {
+				currentFile.NewPath = ""
+				currentFile.Status = "deleted"
+			} else {
+				currentFile.NewPath = path
+				if currentFile.OldPath == "" {
+					currentFile.Status = "added"
+				}
+			}
 			continue
 		}
 
@@ -133,4 +164,14 @@ func ParseGitDiff(diff string) ([]FileDiff, error) {
 	}
 
 	return files, nil
+}
+
+func normalizeDiffPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "/dev/null" || path == "" {
+		return ""
+	}
+	path = strings.TrimPrefix(path, "a/")
+	path = strings.TrimPrefix(path, "b/")
+	return path
 }

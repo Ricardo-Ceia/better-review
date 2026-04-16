@@ -1,11 +1,12 @@
 package main
 
 import (
-	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 type FileStatus string
@@ -37,29 +38,24 @@ type FileDiff struct {
 	ReviewStatus ReviewStatus
 }
 
-// CollectGitDiff runs 'git diff' in the specified repository path and returns the raw output.
-func CollectGitDiff(ctx context.Context, repoPath string) (string, error) {
-	args := []string{"diff", "--no-color"}
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = repoPath
-
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to run git diff: %w", err)
-	}
-
-	return string(out), nil
-}
-
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "opencode" {
-		if err := runProxy(os.Args[1:]); err != nil {
-			log.Fatalf("Proxy error: %v", err)
-		}
-		return
+	opencodeFlag := flag.String("opencode-bin", "", "path to the opencode binary")
+	flag.Parse()
+
+	if err := initLogger(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to initialize debug log: %v\n", err)
+	} else {
+		defer closeLogger()
 	}
 
-	if err := runReview(); err != nil {
+	cwd, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+
+	runner := NewOpencodeRunner(cwd, *opencodeFlag)
+	p := tea.NewProgram(newAppModel(cwd, runner), tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
 		log.Fatalf("Error: %v", err)
 	}
 }

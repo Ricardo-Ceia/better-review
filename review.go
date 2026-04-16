@@ -2,9 +2,19 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
+
+func gitCommand(args ...string) *exec.Cmd {
+	cmd := exec.Command("git", args...)
+	if cwd, err := os.Getwd(); err == nil {
+		cmd.Dir = cwd
+	}
+	return cmd
+}
 
 type ReviewStatus string
 
@@ -19,9 +29,10 @@ func AcceptFile(f *FileDiff) error {
 	if path == "" {
 		path = f.OldPath
 	}
-	err := exec.Command("git", "add", path).Run()
+	err := gitCommand("add", "--", path).Run()
 	if err == nil {
 		f.ReviewStatus = StatusAccepted
+		setAllHunksStatus(f, StatusAccepted)
 	}
 	return err
 }
@@ -31,10 +42,16 @@ func RejectFile(f *FileDiff) error {
 	if path == "" {
 		path = f.OldPath
 	}
-	// Restore the file to discard changes in working directory
-	err := exec.Command("git", "restore", path).Run()
+
+	var err error
+	if f.Status == "added" {
+		err = rejectAddedFile(path)
+	} else {
+		err = gitCommand("restore", "--source=HEAD", "--staged", "--worktree", "--", path).Run()
+	}
 	if err == nil {
 		f.ReviewStatus = StatusRejected
+		setAllHunksStatus(f, StatusRejected)
 	}
 	return err
 }
@@ -44,11 +61,31 @@ func UnstageFile(f *FileDiff) error {
 	if path == "" {
 		path = f.OldPath
 	}
-	err := exec.Command("git", "restore", "--staged", path).Run()
+	err := gitCommand("restore", "--staged", "--", path).Run()
 	if err == nil {
 		f.ReviewStatus = StatusUnreviewed
+		setAllHunksStatus(f, StatusUnreviewed)
 	}
 	return err
+}
+
+func rejectAddedFile(path string) error {
+	if gitCommand("ls-files", "--error-unmatch", "--", path).Run() == nil {
+		return gitCommand("rm", "-f", "--", path).Run()
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	return os.RemoveAll(filepath.Join(cwd, path))
+}
+
+func setAllHunksStatus(file *FileDiff, status ReviewStatus) {
+	for i := range file.Hunks {
+		file.Hunks[i].ReviewStatus = status
+	}
 }
 
 func PatchFromHunk(file *FileDiff, hunk *Hunk) string {
@@ -81,22 +118,46 @@ func PatchFromHunk(file *FileDiff, hunk *Hunk) string {
 
 func AcceptHunk(f *FileDiff, h *Hunk) error {
 	patch := PatchFromHunk(f, h)
-	cmd := exec.Command("git", "apply", "--cached", "-")
+	cmd := gitCommand("apply", "--cached", "-")
 	cmd.Stdin = strings.NewReader(patch)
 	err := cmd.Run()
 	if err == nil {
 		h.ReviewStatus = StatusAccepted
+		syncFileReviewStatus(f)
 	}
 	return err
 }
 
 func RejectHunk(f *FileDiff, h *Hunk) error {
 	patch := PatchFromHunk(f, h)
-	cmd := exec.Command("git", "apply", "--reverse", "-")
+	cmd := gitCommand("apply", "--reverse", "-")
 	cmd.Stdin = strings.NewReader(patch)
 	err := cmd.Run()
 	if err == nil {
 		h.ReviewStatus = StatusRejected
+		syncFileReviewStatus(f)
 	}
 	return err
+}
+
+func syncFileReviewStatus(file *FileDiff) {
+	if len(file.Hunks) == 0 {
+		return
+	}
+
+	accepted := true
+	rejected := true
+	for _, hunk := range file.Hunks {
+		accepted = accepted && hunk.ReviewStatus == StatusAccepted
+		rejected = rejected && hunk.ReviewStatus == StatusRejected
+	}
+
+	switch {
+	case accepted:
+		file.ReviewStatus = StatusAccepted
+	case rejected:
+		file.ReviewStatus = StatusRejected
+	default:
+		file.ReviewStatus = StatusUnreviewed
+	}
 }
