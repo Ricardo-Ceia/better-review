@@ -6,6 +6,7 @@ use tokio::process::Command;
 
 use crate::domain::diff::FileDiff;
 use crate::domain::model_catalog::ModelOption;
+use crate::domain::session::WorkspaceSnapshot;
 use crate::services::git::GitService;
 #[derive(Debug, Clone)]
 pub struct OpencodeService {
@@ -50,12 +51,11 @@ impl OpencodeService {
     pub async fn run_prompt(
         &self,
         git: &GitService,
+        snapshot: &WorkspaceSnapshot,
         prompt: &str,
         model: Option<&str>,
         variant: Option<&str>,
     ) -> Result<RunResult> {
-        let _before = git.collect_diff().await?;
-
         let repo_path = self.repo_path.to_string_lossy().to_string();
         let mut args = vec![
             "run".to_string(),
@@ -92,7 +92,7 @@ impl OpencodeService {
             });
         }
 
-        let (diff, files) = git.collect_diff().await?;
+        let (diff, files) = git.collect_session_diff(snapshot).await?;
         let changed_files = if diff.trim().is_empty() {
             Vec::new()
         } else {

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -20,6 +20,7 @@ use tui_textarea::TextArea;
 
 use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
 use crate::domain::model_catalog::ModelOption;
+use crate::domain::session::WorkspaceSnapshot;
 use crate::services::git::{GitService, patch_from_hunk};
 use crate::services::opencode::{OpencodeService, RunResult};
 use crate::ui::styles;
@@ -51,6 +52,7 @@ struct App {
     models: Vec<ModelOption>,
     selected_model: Option<String>,
     selected_variant: Option<String>,
+    session_snapshot: Option<WorkspaceSnapshot>,
     tx: mpsc::UnboundedSender<Message>,
     rx: mpsc::UnboundedReceiver<Message>,
 }
@@ -75,6 +77,7 @@ struct ReviewUiState {
     cursor_file: usize,
     cursor_hunk: usize,
     focus: ReviewFocus,
+    session_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -106,6 +109,7 @@ impl App {
             models: Vec::new(),
             selected_model: None,
             selected_variant: None,
+            session_snapshot: None,
             tx,
             rx,
         };
@@ -116,6 +120,7 @@ impl App {
     async fn load_initial_state(&mut self) -> Result<()> {
         let (_, files) = self.git.collect_diff().await?;
         self.review.files = files;
+        self.review.session_only = false;
 
         let tx = self.tx.clone();
         let service = self.opencode.clone();
@@ -141,6 +146,39 @@ impl App {
             .find(|model| Some(&model.id) == self.selected_model.as_ref())
             .map(|model| model.variants.clone())
             .unwrap_or_default()
+    }
+
+    fn current_file_path(&self) -> Option<&str> {
+        self.review.files.get(self.review.cursor_file).map(FileDiff::display_path)
+    }
+
+    fn current_snapshot(&self) -> Result<&WorkspaceSnapshot> {
+        self.session_snapshot
+            .as_ref()
+            .context("review session snapshot is unavailable")
+    }
+
+    fn current_file_has_protected_unstaged_content(&self) -> bool {
+        let Some(path) = self.current_file_path() else {
+            return false;
+        };
+        self.session_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.has_unstaged_path(path))
+    }
+
+    fn review_context_label(&self) -> String {
+        match &self.session_snapshot {
+            Some(snapshot) => {
+                let protected = snapshot.protected_path_count();
+                if protected == 0 {
+                    "Session-only review".to_string()
+                } else {
+                    format!("Session-only review  |  protecting {protected} pre-run path(s)")
+                }
+            }
+            None => "Workspace review".to_string(),
+        }
     }
 }
 
@@ -177,6 +215,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         app.review.cursor_file = 0;
                         app.review.cursor_hunk = 0;
                         app.review.focus = ReviewFocus::Files;
+                        app.review.session_only = app.session_snapshot.is_some();
                         app.status = if app.review.files.is_empty() {
                             "Run finished with no code changes.".to_string()
                         } else {
@@ -241,13 +280,21 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                             let git = app.git.clone();
                             let model = app.selected_model.clone();
                             let variant = app.selected_variant.clone();
+                            let snapshot = git.snapshot_workspace().await?;
+                            app.session_snapshot = Some(snapshot.clone());
                             composer = TextArea::default();
                             composer.set_placeholder_text(
                                 "Describe the change you want opencode to make",
                             );
                             tokio::spawn(async move {
                                 let result = service
-                                    .run_prompt(&git, &prompt, model.as_deref(), variant.as_deref())
+                                    .run_prompt(
+                                        &git,
+                                        &snapshot,
+                                        &prompt,
+                                        model.as_deref(),
+                                        variant.as_deref(),
+                                    )
                                     .await
                                     .map_err(|err| err.to_string());
                                 let _ = tx.send(Message::PromptFinished(result));
@@ -347,6 +394,12 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Char('y') => {
             if app.review.focus == ReviewFocus::Files {
+                if app.current_file_has_protected_unstaged_content() {
+                    app.status =
+                        "Cannot accept a file with pre-run unstaged changes. Review hunks or use your editor."
+                            .to_string();
+                    return Ok(());
+                }
                 if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
                     app.git.accept_file(file).await?;
                     app.status = "Accepted file changes.".to_string();
@@ -364,15 +417,17 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
         KeyCode::Char('x') => {
+            let snapshot = app.current_snapshot()?.clone();
             if app.review.focus == ReviewFocus::Files {
                 if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                    app.git.reject_file(file).await?;
+                    app.git.reject_file(file, &snapshot).await?;
                     app.status = "Rejected file changes.".to_string();
                 }
             } else if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
                 if let Some(hunk) = file.hunks.get(app.review.cursor_hunk).cloned() {
                     let patch = patch_from_hunk(file, &hunk);
                     app.git.reverse_apply_patch(&patch).await?;
+                    app.git.reverse_apply_patch_to_index(&patch).await?;
 
                     let hunk = &mut file.hunks[app.review.cursor_hunk];
                     hunk.review_status = ReviewStatus::Rejected;
@@ -382,8 +437,9 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
         KeyCode::Char('u') => {
+            let snapshot = app.current_snapshot()?.clone();
             if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                app.git.unstage_file(file).await?;
+                app.git.unstage_file(file, &snapshot).await?;
                 app.status = "Moved file back to unreviewed.".to_string();
             }
         }
@@ -464,6 +520,8 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled(app.current_model_label(), styles::title()),
             Span::raw("   "),
             status,
+            Span::raw("   "),
+            Span::styled(app.review_context_label(), styles::muted()),
         ]),
         Line::from(Span::styled(app.status.as_str(), styles::muted())),
     ];

@@ -1,10 +1,14 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
 use crate::domain::diff::{FileDiff, ReviewStatus};
+use crate::domain::session::WorkspaceSnapshot;
 use crate::services::parser::parse_git_diff;
+
+const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 #[derive(Debug, Clone)]
 pub struct GitService {
@@ -19,156 +23,251 @@ impl GitService {
     }
 
     pub async fn collect_diff(&self) -> Result<(String, Vec<FileDiff>)> {
-        let tracked = self
-            .run_git(["diff", "--no-color", "--no-ext-diff"])
+        let snapshot = self.snapshot_workspace().await?;
+        let base_tree = self.base_tree().await?;
+        self.diff_between_trees(&base_tree, &snapshot.worktree_tree).await
+    }
+
+    pub async fn snapshot_workspace(&self) -> Result<WorkspaceSnapshot> {
+        let index_tree = self.write_index_tree().await?;
+        let worktree_tree = self.write_worktree_tree().await?;
+        let base_tree = self.base_tree().await?;
+        let protected_paths = self.diff_names_between_trees(&base_tree, &worktree_tree).await?;
+        let unstaged_paths = self.diff_names_between_trees(&index_tree, &worktree_tree).await?;
+
+        Ok(WorkspaceSnapshot {
+            index_tree,
+            worktree_tree,
+            protected_paths,
+            unstaged_paths,
+        })
+    }
+
+    pub async fn collect_session_diff(
+        &self,
+        snapshot: &WorkspaceSnapshot,
+    ) -> Result<(String, Vec<FileDiff>)> {
+        let current_worktree = self.write_worktree_tree().await?;
+        self.diff_between_trees(&snapshot.worktree_tree, &current_worktree)
             .await
-            .context("collect tracked diff")?;
-        let untracked = self.collect_untracked_diff().await?;
-
-        let combined = if tracked.is_empty() {
-            untracked
-        } else if untracked.is_empty() {
-            tracked
-        } else {
-            format!("{tracked}\n{untracked}")
-        };
-
-        let files = parse_git_diff(&combined)?;
-        Ok((combined, files))
     }
 
     pub async fn accept_file(&self, file: &mut FileDiff) -> Result<()> {
         let path = display_path(file);
-        self.run_git(["add", "--", path]).await?;
+        self.run_git(&["add", "--", path]).await?;
         file.set_all_hunks_status(ReviewStatus::Accepted);
         Ok(())
     }
 
-    pub async fn reject_file(&self, file: &mut FileDiff) -> Result<()> {
+    pub async fn reject_file(
+        &self,
+        file: &mut FileDiff,
+        snapshot: &WorkspaceSnapshot,
+    ) -> Result<()> {
         let path = display_path(file);
-        match file.status {
-            crate::domain::diff::FileStatus::Added => self.reject_added_file(path).await?,
-            _ => {
-                self.run_git([
-                    "restore",
-                    "--source=HEAD",
-                    "--staged",
-                    "--worktree",
-                    "--",
-                    path,
-                ])
-                .await?;
-            }
-        }
+        self.restore_path_to_snapshot(path, snapshot).await?;
         file.set_all_hunks_status(ReviewStatus::Rejected);
         Ok(())
     }
 
-    pub async fn unstage_file(&self, file: &mut FileDiff) -> Result<()> {
+    pub async fn unstage_file(
+        &self,
+        file: &mut FileDiff,
+        snapshot: &WorkspaceSnapshot,
+    ) -> Result<()> {
         let path = display_path(file);
-        self.run_git(["restore", "--staged", "--", path]).await?;
+        self.restore_path_in_index(path, &snapshot.index_tree).await?;
         file.set_all_hunks_status(ReviewStatus::Unreviewed);
         Ok(())
     }
 
     pub async fn apply_patch_to_index(&self, patch: &str) -> Result<()> {
-        let output = Command::new("git")
-            .args(["apply", "--cached", "-"])
-            .current_dir(&self.repo_path)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .context("spawn git apply --cached")?;
-
-        let output = feed_stdin_and_wait(output, patch).await?;
-        if !output.status.success() {
-            bail!(String::from_utf8_lossy(&output.stderr).to_string());
-        }
-        Ok(())
+        self.run_git_apply(&["apply", "--cached", "-"], patch)
+            .await
+            .context("apply patch to index")
     }
 
     pub async fn reverse_apply_patch(&self, patch: &str) -> Result<()> {
-        let output = Command::new("git")
-            .args(["apply", "--reverse", "-"])
+        self.run_git_apply(&["apply", "--reverse", "-"], patch)
+            .await
+            .context("reverse patch in worktree")
+    }
+
+    pub async fn reverse_apply_patch_to_index(&self, patch: &str) -> Result<()> {
+        self.run_git_apply(&["apply", "--cached", "--reverse", "-"], patch)
+            .await
+            .context("reverse patch in index")
+    }
+
+    async fn restore_path_to_snapshot(&self, path: &str, snapshot: &WorkspaceSnapshot) -> Result<()> {
+        self.restore_path_in_index(path, &snapshot.index_tree).await?;
+        self.restore_path_in_worktree(path, &snapshot.worktree_tree)
+            .await?;
+        Ok(())
+    }
+
+    async fn restore_path_in_index(&self, path: &str, tree: &str) -> Result<()> {
+        if self.tree_contains_path(tree, path).await? {
+            self.run_git(&["restore", "--source", tree, "--staged", "--", path])
+                .await?;
+        } else {
+            self.run_git(&["rm", "--cached", "-r", "--ignore-unmatch", "--", path])
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn restore_path_in_worktree(&self, path: &str, tree: &str) -> Result<()> {
+        if self.tree_contains_path(tree, path).await? {
+            self.run_git(&["restore", "--source", tree, "--worktree", "--", path])
+                .await?;
+        } else {
+            self.remove_path_from_worktree(path).await?;
+        }
+        Ok(())
+    }
+
+    async fn remove_path_from_worktree(&self, path: &str) -> Result<()> {
+        let full_path = self.repo_path.join(path);
+        if !full_path.exists() {
+            return Ok(());
+        }
+
+        if full_path.is_dir() {
+            tokio::fs::remove_dir_all(&full_path).await?;
+        } else {
+            tokio::fs::remove_file(&full_path).await?;
+        }
+        prune_empty_parents(&self.repo_path, &full_path).await?;
+        Ok(())
+    }
+
+    async fn diff_between_trees(&self, old_tree: &str, new_tree: &str) -> Result<(String, Vec<FileDiff>)> {
+        if old_tree == new_tree {
+            return Ok((String::new(), Vec::new()));
+        }
+
+        let diff = self
+            .run_git(&["diff", "--no-color", "--no-ext-diff", "--find-renames", old_tree, new_tree])
+            .await
+            .with_context(|| format!("diff trees {old_tree}..{new_tree}"))?;
+        let files = if diff.trim().is_empty() {
+            Vec::new()
+        } else {
+            parse_git_diff(&diff)?
+        };
+        Ok((diff, files))
+    }
+
+    async fn diff_names_between_trees(&self, old_tree: &str, new_tree: &str) -> Result<Vec<String>> {
+        if old_tree == new_tree {
+            return Ok(Vec::new());
+        }
+
+        let output = self
+            .run_git(&["diff", "--name-only", "--find-renames", old_tree, new_tree])
+            .await
+            .with_context(|| format!("diff tree names {old_tree}..{new_tree}"))?;
+        let mut paths = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    async fn base_tree(&self) -> Result<String> {
+        let output = self.output_git(&["rev-parse", "--verify", "HEAD^{tree}"]).await?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        }
+
+        Ok(EMPTY_TREE_HASH.to_string())
+    }
+
+    async fn write_index_tree(&self) -> Result<String> {
+        Ok(self.run_git(&["write-tree"]).await?.trim().to_string())
+    }
+
+    async fn write_worktree_tree(&self) -> Result<String> {
+        let temp_index_path = temp_git_index_path();
+        let temp_index = temp_index_path.to_string_lossy().into_owned();
+
+        let result = async {
+            self.run_git_with_env(&["add", "-A"], &[("GIT_INDEX_FILE", temp_index.as_str())])
+                .await?;
+            self.run_git_with_env(&["write-tree"], &[("GIT_INDEX_FILE", temp_index.as_str())])
+                .await
+        }
+        .await;
+
+        cleanup_temp_index(&temp_index_path).await;
+        Ok(result?.trim().to_string())
+    }
+
+    async fn tree_contains_path(&self, tree: &str, path: &str) -> Result<bool> {
+        let object = format!("{tree}:{path}");
+        let output = self.output_git(&["cat-file", "-e", object.as_str()]).await?;
+        Ok(output.status.success())
+    }
+
+    async fn run_git_apply(&self, args: &[&str], patch: &str) -> Result<()> {
+        let child = Command::new("git")
+            .args(args)
             .current_dir(&self.repo_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .context("spawn git apply --reverse")?;
+            .with_context(|| format!("spawn git {}", args.join(" ")))?;
 
-        let output = feed_stdin_and_wait(output, patch).await?;
+        let output = feed_stdin_and_wait(child, patch).await?;
         if !output.status.success() {
             bail!(String::from_utf8_lossy(&output.stderr).to_string());
         }
         Ok(())
     }
 
-    async fn collect_untracked_diff(&self) -> Result<String> {
-        let raw = self
-            .run_git(["ls-files", "--others", "--exclude-standard", "-z"])
-            .await?;
-        if raw.is_empty() {
-            return Ok(String::new());
-        }
-
-        let mut chunks = Vec::new();
-        for path in raw.split('\0').filter(|value| !value.is_empty()) {
-            let output = Command::new("git")
-                .args(["diff", "--no-index", "--no-color", "--", "/dev/null", path])
-                .current_dir(&self.repo_path)
-                .output()
-                .await
-                .with_context(|| format!("diff untracked file {path}"))?;
-
-            if output.status.success() || output.status.code() == Some(1) {
-                let diff = String::from_utf8_lossy(&output.stdout).to_string();
-                if !diff.trim().is_empty() {
-                    chunks.push(diff);
-                }
-            } else {
-                bail!(String::from_utf8_lossy(&output.stderr).to_string());
-            }
-        }
-
-        Ok(chunks.join("\n"))
-    }
-
-    async fn reject_added_file(&self, path: &str) -> Result<()> {
-        let tracked = Command::new("git")
-            .args(["ls-files", "--error-unmatch", "--", path])
-            .current_dir(&self.repo_path)
-            .output()
-            .await
-            .context("check tracked file")?;
-        if tracked.status.success() {
-            self.run_git(["rm", "-f", "--", path]).await?;
-            return Ok(());
-        }
-
-        let full_path = self.repo_path.join(path);
-        if full_path.is_dir() {
-            tokio::fs::remove_dir_all(full_path).await?;
-        } else if full_path.exists() {
-            tokio::fs::remove_file(full_path).await?;
-        }
-        Ok(())
-    }
-
-    async fn run_git<const N: usize>(&self, args: [&str; N]) -> Result<String> {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(&self.repo_path)
-            .output()
-            .await
-            .with_context(|| format!("run git {:?}", args))?;
-
+    async fn run_git(&self, args: &[&str]) -> Result<String> {
+        let output = self.output_git(args).await?;
         if !output.status.success() {
             bail!(String::from_utf8_lossy(&output.stderr).to_string());
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    async fn run_git_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String> {
+        let output = self.output_git_with_env(args, envs).await?;
+        if !output.status.success() {
+            bail!(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    async fn output_git(&self, args: &[&str]) -> Result<std::process::Output> {
+        self.output_git_with_env(args, &[]).await
+    }
+
+    async fn output_git_with_env(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Result<std::process::Output> {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(&self.repo_path);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+
+        command
+            .output()
+            .await
+            .with_context(|| format!("run git {:?}", args))
     }
 }
 
@@ -178,6 +277,38 @@ fn display_path(file: &FileDiff) -> &str {
     } else {
         &file.old_path
     }
+}
+
+fn temp_git_index_path() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!("better-review-{}-{unique}.index", std::process::id()))
+}
+
+async fn cleanup_temp_index(path: &Path) {
+    let _ = tokio::fs::remove_file(path).await;
+    let lock_path = format!("{}.lock", path.display());
+    let _ = tokio::fs::remove_file(lock_path).await;
+}
+
+async fn prune_empty_parents(repo_root: &Path, path: &Path) -> Result<()> {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir == repo_root {
+            break;
+        }
+
+        match tokio::fs::remove_dir(dir).await {
+            Ok(_) => current = dir.parent(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => current = dir.parent(),
+            Err(err) if err.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    Ok(())
 }
 
 async fn feed_stdin_and_wait(
@@ -228,18 +359,107 @@ pub fn patch_from_hunk(file: &FileDiff, hunk: &crate::domain::diff::Hunk) -> Str
 mod tests {
     use super::GitService;
     use anyhow::Result;
+    use std::path::Path;
+    use tokio::process::Command;
 
     #[tokio::test]
     async fn collect_diff_handles_empty_repo() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        tokio::process::Command::new("git")
-            .args(["init"])
-            .current_dir(temp.path())
-            .output()
-            .await?;
+        init_repo(temp.path()).await?;
+
         let service = GitService::new(temp.path());
         let (_, files) = service.collect_diff().await?;
         assert!(files.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collect_session_diff_excludes_preexisting_dirty_paths() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        write_file(temp.path(), "tracked.txt", "user\n").await?;
+        write_file(temp.path(), "notes.md", "keep me\n").await?;
+
+        let service = GitService::new(temp.path());
+        let snapshot = service.snapshot_workspace().await?;
+        assert_eq!(snapshot.protected_path_count(), 2);
+
+        write_file(temp.path(), "tracked.txt", "user\nagent\n").await?;
+        write_file(temp.path(), "generated.rs", "fn main() {}\n").await?;
+
+        let (_, files) = service.collect_session_diff(&snapshot).await?;
+        let paths = files
+            .iter()
+            .map(|file| file.display_path().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["generated.rs".to_string(), "tracked.txt".to_string()]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reject_file_restores_preexisting_staged_state() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        write_file(temp.path(), "tracked.txt", "preexisting\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+
+        let service = GitService::new(temp.path());
+        let snapshot = service.snapshot_workspace().await?;
+
+        write_file(temp.path(), "tracked.txt", "preexisting\nagent\n").await?;
+        let (_, mut files) = service.collect_session_diff(&snapshot).await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked session diff");
+
+        service.reject_file(file, &snapshot).await?;
+
+        let worktree = tokio::fs::read_to_string(temp.path().join("tracked.txt")).await?;
+        assert_eq!(worktree, "preexisting\n");
+
+        let staged = git_stdout(temp.path(), &["show", ":tracked.txt"]).await?;
+        assert_eq!(staged, "preexisting\n");
+        Ok(())
+    }
+
+    async fn init_repo(path: &Path) -> Result<()> {
+        Command::new("git").args(["init"]).current_dir(path).output().await?;
+        git(path, &["config", "user.email", "test@example.com"]).await?;
+        git(path, &["config", "user.name", "Test User"]).await?;
+        Ok(())
+    }
+
+    async fn git(path: &Path, args: &[&str]) -> Result<()> {
+        let output = Command::new("git").args(args).current_dir(path).output().await?;
+        if !output.status.success() {
+            anyhow::bail!(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+        Ok(())
+    }
+
+    async fn git_stdout(path: &Path, args: &[&str]) -> Result<String> {
+        let output = Command::new("git").args(args).current_dir(path).output().await?;
+        if !output.status.success() {
+            anyhow::bail!(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    async fn write_file(root: &Path, path: &str, contents: &str) -> Result<()> {
+        let file_path = root.join(path);
+        if let Some(parent) = file_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(file_path, contents).await?;
         Ok(())
     }
 }
