@@ -69,6 +69,7 @@ enum Overlay {
     None,
     Composer,
     ModelPicker,
+    CommitPrompt,
 }
 
 #[derive(Default)]
@@ -180,6 +181,61 @@ impl App {
             None => "Workspace review".to_string(),
         }
     }
+
+    fn review_counts(&self) -> ReviewCounts {
+        let mut counts = ReviewCounts::default();
+
+        for file in &self.review.files {
+            if file.hunks.is_empty() {
+                counts.bump(&file.review_status);
+            } else {
+                for hunk in &file.hunks {
+                    counts.bump(&hunk.review_status);
+                }
+            }
+        }
+
+        counts
+    }
+
+    async fn open_commit_prompt(&mut self) -> Result<TextArea<'static>> {
+        let snapshot = self.current_snapshot()?;
+        if snapshot.had_staged_changes {
+            self.status =
+                "Cannot commit from better-review because the session started with unrelated staged changes."
+                    .to_string();
+            anyhow::bail!("preexisting staged changes block in-app commit");
+        }
+
+        if !self.git.has_staged_changes().await? {
+            self.status = "No accepted changes are staged yet.".to_string();
+            anyhow::bail!("no staged changes to commit");
+        }
+
+        self.overlay = Overlay::CommitPrompt;
+        self.status = "Write a commit message for the accepted changes.".to_string();
+
+        let mut commit_message = TextArea::default();
+        commit_message.set_placeholder_text("Write the commit message for accepted changes");
+        Ok(commit_message)
+    }
+}
+
+#[derive(Default)]
+struct ReviewCounts {
+    unreviewed: usize,
+    accepted: usize,
+    rejected: usize,
+}
+
+impl ReviewCounts {
+    fn bump(&mut self, status: &ReviewStatus) {
+        match status {
+            ReviewStatus::Unreviewed => self.unreviewed += 1,
+            ReviewStatus::Accepted => self.accepted += 1,
+            ReviewStatus::Rejected => self.rejected += 1,
+        }
+    }
 }
 
 async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
@@ -187,6 +243,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
     let matcher = SkimMatcherV2::default();
     let mut composer = TextArea::default();
     composer.set_placeholder_text("Describe the change you want opencode to make");
+    let mut commit_message = TextArea::default();
+    commit_message.set_placeholder_text("Write the commit message for accepted changes");
     let mut model_search = TextArea::default();
     model_search.set_placeholder_text("Search by provider or model");
     let mut model_cursor = 0_usize;
@@ -241,6 +299,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                 frame,
                 &app,
                 &composer,
+                &commit_message,
                 &model_search,
                 &matcher,
                 model_cursor,
@@ -336,12 +395,51 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                             }
                         }
                     }
+                    Overlay::CommitPrompt => match key.code {
+                        KeyCode::Esc => {
+                            app.overlay = Overlay::None;
+                            app.status = "Commit cancelled. Review remains active.".to_string();
+                        }
+                        KeyCode::Enter => {
+                            let message = commit_message.lines().join("\n").trim().to_string();
+                            if message.is_empty() {
+                                app.status = "Write a commit message first.".to_string();
+                                continue;
+                            }
+
+                            app.git.commit_staged(&message).await?;
+                            let (_, files) = if let Some(snapshot) = app.session_snapshot.as_ref() {
+                                app.git.collect_session_diff(snapshot).await?
+                            } else {
+                                app.git.collect_diff().await?
+                            };
+                            app.review.files = files;
+                            app.review.cursor_file = 0;
+                            app.review.cursor_hunk = 0;
+                            app.review.focus = ReviewFocus::Files;
+                            app.overlay = Overlay::None;
+                            app.status = "Committed accepted changes.".to_string();
+                            commit_message = TextArea::default();
+                            commit_message
+                                .set_placeholder_text("Write the commit message for accepted changes");
+                        }
+                        _ => {
+                            commit_message.input(to_textarea_input(key));
+                        }
+                    },
                     Overlay::None => {
                         if key.code == KeyCode::Char('o')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
                             app.overlay = Overlay::Composer;
                             app.status = "Compose a new prompt.".to_string();
+                            continue;
+                        }
+
+                        if key.code == KeyCode::Char('c') {
+                            if let Ok(new_commit_message) = app.open_commit_prompt().await {
+                                commit_message = new_commit_message;
+                            }
                             continue;
                         }
 
@@ -453,6 +551,7 @@ fn draw(
     frame: &mut ratatui::Frame,
     app: &App,
     composer: &TextArea<'_>,
+    commit_message: &TextArea<'_>,
     model_search: &TextArea<'_>,
     matcher: &SkimMatcherV2,
     model_cursor: usize,
@@ -476,6 +575,7 @@ fn draw(
         Overlay::ModelPicker => {
             draw_model_picker(frame, layout[1], app, model_search, matcher, model_cursor)
         }
+        Overlay::CommitPrompt => draw_commit_prompt(frame, layout[1], app, commit_message),
         Overlay::None => {}
     }
 }
@@ -504,6 +604,8 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         ),
     };
 
+    let counts = app.review_counts();
+
     let lines = vec![
         Line::from(vec![
             Span::styled("better-review", styles::title()),
@@ -523,7 +625,17 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::raw("   "),
             Span::styled(app.review_context_label(), styles::muted()),
         ]),
-        Line::from(Span::styled(app.status.as_str(), styles::muted())),
+        Line::from(vec![
+            Span::styled(app.status.as_str(), styles::muted()),
+            Span::raw("    "),
+            Span::styled(
+                format!(
+                    "Unreviewed {}  Accepted {}  Rejected {}",
+                    counts.unreviewed, counts.accepted, counts.rejected
+                ),
+                styles::muted(),
+            ),
+        ]),
     ];
 
     let paragraph = Paragraph::new(lines).block(
@@ -537,7 +649,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect) {
     let line = Line::from(vec![
         Span::styled(
-            "Ctrl+O composer  |  Enter open diff  |  Esc files  |  y accept  |  x reject",
+            "Ctrl+O composer  |  Enter open diff  |  Esc files  |  y accept  |  x reject  |  c commit",
             styles::subtle(),
         ),
         Span::raw("    "),
@@ -587,15 +699,6 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(index, file)| {
-            let marker = match file.review_status {
-                ReviewStatus::Accepted => "A",
-                ReviewStatus::Rejected => "R",
-                ReviewStatus::Unreviewed => match file.status {
-                    crate::domain::diff::FileStatus::Added => "+",
-                    crate::domain::diff::FileStatus::Deleted => "-",
-                    crate::domain::diff::FileStatus::Modified => "M",
-                },
-            };
             let style = if index == app.review.cursor_file {
                 Style::default()
                     .fg(styles::TEXT_PRIMARY)
@@ -604,6 +707,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             } else {
                 Style::default().fg(styles::TEXT_MUTED)
             };
+            let marker = review_marker(file.review_status.clone(), file.status, false);
             ListItem::new(Line::from(vec![
                 Span::styled(format!(" {marker} "), style),
                 Span::styled(truncate_path(file.display_path(), 28), style),
@@ -613,7 +717,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let sidebar = List::new(items).block(
         Block::default()
-            .title("Files")
+            .title(format!("Files  [{} unreviewed]", app.review_counts().unreviewed))
             .borders(Borders::RIGHT)
             .border_style(
                 Style::default().fg(if app.review.focus == ReviewFocus::Files {
@@ -658,11 +762,16 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let status = match hunk.review_status {
                 ReviewStatus::Accepted => " [accepted]",
                 ReviewStatus::Rejected => " [rejected]",
-                ReviewStatus::Unreviewed => "",
+                ReviewStatus::Unreviewed => " [unreviewed]",
             };
 
             diff_lines.push(Line::from(Span::styled(
-                format!("{}{}", hunk.header, status),
+                format!(
+                    "{} {}{}",
+                    review_marker(hunk.review_status.clone(), file.status, true),
+                    hunk.header,
+                    status
+                ),
                 style,
             )));
             for line in &hunk.lines {
@@ -762,6 +871,54 @@ fn draw_composer(frame: &mut ratatui::Frame, area: Rect, app: &App, composer: &T
     );
     frame.render_widget(composer, lines[2]);
     frame.render_widget(Paragraph::new("Enter run").style(styles::muted()), lines[3]);
+}
+
+fn draw_commit_prompt(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    app: &App,
+    commit_message: &TextArea<'_>,
+) {
+    let modal = centered_rect(60, 35, area);
+    frame.render_widget(Clear, modal);
+    let inner = modal.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let lines = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(5),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let counts = app.review_counts();
+    let block = Block::default()
+        .title("Commit Accepted Changes")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(styles::ACCENT))
+        .style(Style::default().bg(styles::SURFACE_RAISED));
+    frame.render_widget(block, modal);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Accepted {}  |  Rejected {}  |  Unreviewed {}",
+            counts.accepted, counts.rejected, counts.unreviewed
+        ))
+        .style(styles::title()),
+        lines[0],
+    );
+    frame.render_widget(
+        Paragraph::new("Enter commit   Esc close").style(styles::muted()),
+        lines[1],
+    );
+    frame.render_widget(commit_message, lines[2]);
+    frame.render_widget(
+        Paragraph::new("Only accepted staged changes are committed.").style(styles::muted()),
+        lines[3],
+    );
 }
 
 fn draw_model_picker(
@@ -880,6 +1037,23 @@ fn filtered_models<'a>(
             .then(a.1.name.cmp(&b.1.name))
     });
     scored.into_iter().map(|(_, model)| model).collect()
+}
+
+fn review_marker(
+    status: ReviewStatus,
+    file_status: crate::domain::diff::FileStatus,
+    is_hunk: bool,
+) -> &'static str {
+    match status {
+        ReviewStatus::Accepted => "[✓]",
+        ReviewStatus::Rejected => "[x]",
+        ReviewStatus::Unreviewed if is_hunk => "[ ]",
+        ReviewStatus::Unreviewed => match file_status {
+            crate::domain::diff::FileStatus::Added => "[+]",
+            crate::domain::diff::FileStatus::Deleted => "[-]",
+            crate::domain::diff::FileStatus::Modified => "[ ]",
+        },
+    }
 }
 
 fn cycle_variant(app: &mut App, direction: isize) {

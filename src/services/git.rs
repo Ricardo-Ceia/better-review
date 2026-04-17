@@ -34,12 +34,14 @@ impl GitService {
         let base_tree = self.base_tree().await?;
         let protected_paths = self.diff_names_between_trees(&base_tree, &worktree_tree).await?;
         let unstaged_paths = self.diff_names_between_trees(&index_tree, &worktree_tree).await?;
+        let had_staged_changes = index_tree != base_tree;
 
         Ok(WorkspaceSnapshot {
             index_tree,
             worktree_tree,
             protected_paths,
             unstaged_paths,
+            had_staged_changes,
         })
     }
 
@@ -97,6 +99,16 @@ impl GitService {
         self.run_git_apply(&["apply", "--cached", "--reverse", "-"], patch)
             .await
             .context("reverse patch in index")
+    }
+
+    pub async fn has_staged_changes(&self) -> Result<bool> {
+        let output = self.output_git(&["diff", "--cached", "--quiet"]).await?;
+        Ok(!output.status.success())
+    }
+
+    pub async fn commit_staged(&self, message: &str) -> Result<()> {
+        self.run_git(&["commit", "-m", message]).await?;
+        Ok(())
     }
 
     async fn restore_path_to_snapshot(&self, path: &str, snapshot: &WorkspaceSnapshot) -> Result<()> {
@@ -428,6 +440,51 @@ mod tests {
 
         let staged = git_stdout(temp.path(), &["show", ":tracked.txt"]).await?;
         assert_eq!(staged, "preexisting\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn snapshot_marks_preexisting_staged_changes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        write_file(temp.path(), "tracked.txt", "staged\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+
+        let service = GitService::new(temp.path());
+        let snapshot = service.snapshot_workspace().await?;
+        assert!(snapshot.had_staged_changes);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_staged_creates_commit_for_accepted_changes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        let service = GitService::new(temp.path());
+        let snapshot = service.snapshot_workspace().await?;
+        write_file(temp.path(), "tracked.txt", "accepted\n").await?;
+        let (_, mut files) = service.collect_session_diff(&snapshot).await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked file in session diff");
+
+        service.accept_file(file).await?;
+        assert!(service.has_staged_changes().await?);
+        service.commit_staged("commit accepted changes").await?;
+
+        let head = git_stdout(temp.path(), &["log", "-1", "--pretty=%s"]).await?;
+        assert_eq!(head.trim(), "commit accepted changes");
+        let content = tokio::fs::read_to_string(temp.path().join("tracked.txt")).await?;
+        assert_eq!(content, "accepted\n");
         Ok(())
     }
 

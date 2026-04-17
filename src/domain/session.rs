@@ -4,6 +4,7 @@ pub struct WorkspaceSnapshot {
     pub worktree_tree: String,
     pub protected_paths: Vec<String>,
     pub unstaged_paths: Vec<String>,
+    pub had_staged_changes: bool,
 }
 
 impl WorkspaceSnapshot {
