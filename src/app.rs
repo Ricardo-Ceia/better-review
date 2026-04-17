@@ -2,10 +2,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode,
 };
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -28,14 +29,20 @@ use crate::ui::styles;
 pub async fn run() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        TerminalClear(ClearType::All),
+        TerminalClear(ClearType::Purge)
+    )?;
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?; 
+    let mut terminal = Terminal::new(backend)?;
 
     let result = run_app(&mut terminal).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     result
