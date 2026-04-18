@@ -16,7 +16,7 @@ Set Margin 16
 Set MarginFill "#11111b"
 Set BorderRadius 8
 Set CursorBlink false
-Set TypingSpeed 20ms
+Set TypingSpeed 10ms
 Set PlaybackSpeed 0.92
 Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
