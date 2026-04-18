@@ -463,14 +463,14 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         KeyCode::Tab => {
                             app.overlay = Overlay::ModelPicker;
                         }
-                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            submit_composer_prompt(&mut app, &mut composer).await?;
-                        }
                         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             submit_composer_prompt(&mut app, &mut composer).await?;
                         }
-                        KeyCode::Enter => {
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                             composer.input(to_textarea_input(key));
+                        }
+                        KeyCode::Enter => {
+                            submit_composer_prompt(&mut app, &mut composer).await?;
                         }
                         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             cycle_variant(&mut app, 1);
@@ -513,14 +513,14 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                             app.overlay = Overlay::None;
                             app.status = "Commit cancelled. Review remains active.".to_string();
                         }
-                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            submit_commit_message(&mut app, &mut commit_message).await?;
-                        }
                         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             submit_commit_message(&mut app, &mut commit_message).await?;
                         }
-                        KeyCode::Enter => {
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                             commit_message.input(to_textarea_input(key));
+                        }
+                        KeyCode::Enter => {
+                            submit_commit_message(&mut app, &mut commit_message).await?;
                         }
                         _ => {
                             commit_message.input(to_textarea_input(key));
@@ -1234,8 +1234,6 @@ fn draw_composer(frame: &mut ratatui::Frame, area: Rect, app: &App, composer: &T
             Span::raw(" models   "),
             Span::styled("Ctrl+T", styles::keybind()),
             Span::raw(" variant   "),
-            Span::styled("Ctrl+S", styles::keybind()),
-            Span::raw(" run   "),
             Span::styled("Esc", styles::keybind()),
             Span::raw(" close"),
         ])])
@@ -1246,6 +1244,8 @@ fn draw_composer(frame: &mut ratatui::Frame, area: Rect, app: &App, composer: &T
     frame.render_widget(
         Paragraph::new(vec![Line::from(vec![
             Span::styled("Enter", styles::keybind()),
+            Span::raw(" run   "),
+            Span::styled("Shift+Enter", styles::keybind()),
             Span::raw(" newline   "),
             Span::styled("Up/Down", styles::keybind()),
             Span::raw(" move"),
@@ -1295,9 +1295,9 @@ fn draw_commit_prompt(
     frame.render_widget(
         Paragraph::new(vec![Line::from(vec![
             Span::raw("Commit prompt active  |  "),
-            Span::styled("Ctrl+S", styles::keybind()),
-            Span::raw(" commit  |  "),
             Span::styled("Enter", styles::keybind()),
+            Span::raw(" commit  |  "),
+            Span::styled("Shift+Enter", styles::keybind()),
             Span::raw(" newline  |  "),
             Span::styled("Esc", styles::keybind()),
             Span::raw(" close"),
