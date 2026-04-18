@@ -18,8 +18,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui_core::style::{Modifier, Style};
 use ratatui_core::widgets::Widget;
 use ratatui_interact::components::{AnimatedText, AnimatedTextState, AnimatedTextStyle};
+use ratatui_textarea::{TextArea, WrapMode};
 use tokio::sync::mpsc;
-use ratatui_textarea::TextArea;
 
 use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
 use crate::domain::model_catalog::ModelOption;
@@ -224,9 +224,7 @@ impl App {
         self.overlay = Overlay::CommitPrompt;
         self.status = "Write a commit message for the accepted changes.".to_string();
 
-        let mut commit_message = TextArea::default();
-        commit_message.set_placeholder_text("Write the commit message for accepted changes");
-        commit_message
+        new_commit_message_input()
     }
 }
 
@@ -264,13 +262,101 @@ impl ReviewCounts {
     }
 }
 
+fn new_composer_input() -> TextArea<'static> {
+    let mut composer = TextArea::default();
+    composer.set_placeholder_text("Describe the change you want opencode to make");
+    composer.set_wrap_mode(WrapMode::WordOrGlyph);
+    composer
+}
+
+fn new_commit_message_input() -> TextArea<'static> {
+    let mut commit_message = TextArea::default();
+    commit_message.set_placeholder_text("Write the commit message for accepted changes");
+    commit_message.set_wrap_mode(WrapMode::WordOrGlyph);
+    commit_message
+}
+
+async fn submit_composer_prompt(app: &mut App, composer: &mut TextArea<'static>) -> Result<()> {
+    if app.run_state == RunState::Running {
+        return Ok(());
+    }
+    let prompt = composer.lines().join("\n").trim().to_string();
+    if prompt.is_empty() {
+        app.status = "Write a prompt first.".to_string();
+        return Ok(());
+    }
+
+    app.run_state = RunState::Running;
+    app.status = format!("Running opencode with {}...", app.current_model_label());
+    let tx = app.tx.clone();
+    let service = app.opencode.clone();
+    let git = app.git.clone();
+    let model = app.selected_model.clone();
+    let variant = app.selected_variant.clone();
+    let snapshot = git.snapshot_workspace().await?;
+    app.session_snapshot = Some(snapshot.clone());
+    *composer = new_composer_input();
+    tokio::spawn(async move {
+        let result = service
+            .run_prompt(
+                &git,
+                &snapshot,
+                &prompt,
+                model.as_deref(),
+                variant.as_deref(),
+            )
+            .await
+            .map_err(|err| err.to_string());
+        let _ = tx.send(Message::PromptFinished(result));
+    });
+
+    Ok(())
+}
+
+async fn submit_commit_message(app: &mut App, commit_message: &mut TextArea<'static>) -> Result<()> {
+    let message = commit_message.lines().join("\n").trim().to_string();
+    if message.is_empty() {
+        app.status = "Write a commit message first.".to_string();
+        return Ok(());
+    }
+
+    if !app.git.has_staged_changes().await? {
+        app.status = "No accepted changes are staged yet.".to_string();
+        return Ok(());
+    }
+
+    if app
+        .session_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.had_staged_changes)
+    {
+        app.status = "Cannot commit from better-review because the session started with unrelated staged changes."
+            .to_string();
+        return Ok(());
+    }
+
+    app.git.commit_staged(&message).await?;
+    let (_, files) = if let Some(snapshot) = app.session_snapshot.as_ref() {
+        app.git.collect_session_diff(snapshot).await?
+    } else {
+        app.git.collect_diff().await?
+    };
+    app.review.files = files;
+    app.review.cursor_file = 0;
+    app.review.cursor_hunk = 0;
+    app.review.focus = ReviewFocus::Files;
+    app.overlay = Overlay::None;
+    app.status = "Committed accepted changes.".to_string();
+    *commit_message = new_commit_message_input();
+
+    Ok(())
+}
+
 async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
     let mut app = App::new().await?;
     let matcher = SkimMatcherV2::default();
-    let mut composer = TextArea::default();
-    composer.set_placeholder_text("Describe the change you want opencode to make");
-    let mut commit_message = TextArea::default();
-    commit_message.set_placeholder_text("Write the commit message for accepted changes");
+    let mut composer = new_composer_input();
+    let mut commit_message = new_commit_message_input();
     let mut model_search = TextArea::default();
     model_search.set_placeholder_text("Search by provider or model");
     let mut model_cursor = 0_usize;
@@ -377,42 +463,14 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         KeyCode::Tab => {
                             app.overlay = Overlay::ModelPicker;
                         }
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            submit_composer_prompt(&mut app, &mut composer).await?;
+                        }
+                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            submit_composer_prompt(&mut app, &mut composer).await?;
+                        }
                         KeyCode::Enter => {
-                            if app.run_state == RunState::Running {
-                                continue;
-                            }
-                            let prompt = composer.lines().join("\n").trim().to_string();
-                            if prompt.is_empty() {
-                                app.status = "Write a prompt first.".to_string();
-                                continue;
-                            }
-                            app.run_state = RunState::Running;
-                            app.status =
-                                format!("Running opencode with {}...", app.current_model_label());
-                            let tx = app.tx.clone();
-                            let service = app.opencode.clone();
-                            let git = app.git.clone();
-                            let model = app.selected_model.clone();
-                            let variant = app.selected_variant.clone();
-                            let snapshot = git.snapshot_workspace().await?;
-                            app.session_snapshot = Some(snapshot.clone());
-                            composer = TextArea::default();
-                            composer.set_placeholder_text(
-                                "Describe the change you want opencode to make",
-                            );
-                            tokio::spawn(async move {
-                                let result = service
-                                    .run_prompt(
-                                        &git,
-                                        &snapshot,
-                                        &prompt,
-                                        model.as_deref(),
-                                        variant.as_deref(),
-                                    )
-                                    .await
-                                    .map_err(|err| err.to_string());
-                                let _ = tx.send(Message::PromptFinished(result));
-                            });
+                            composer.input(to_textarea_input(key));
                         }
                         KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             cycle_variant(&mut app, 1);
@@ -455,44 +513,14 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                             app.overlay = Overlay::None;
                             app.status = "Commit cancelled. Review remains active.".to_string();
                         }
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            submit_commit_message(&mut app, &mut commit_message).await?;
+                        }
+                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            submit_commit_message(&mut app, &mut commit_message).await?;
+                        }
                         KeyCode::Enter => {
-                            let message = commit_message.lines().join("\n").trim().to_string();
-                            if message.is_empty() {
-                                app.status = "Write a commit message first.".to_string();
-                                continue;
-                            }
-
-                            if !app.git.has_staged_changes().await? {
-                                app.status = "No accepted changes are staged yet.".to_string();
-                                continue;
-                            }
-
-                            if app
-                                .session_snapshot
-                                .as_ref()
-                                .is_some_and(|snapshot| snapshot.had_staged_changes)
-                            {
-                                app.status =
-                                    "Cannot commit from better-review because the session started with unrelated staged changes."
-                                        .to_string();
-                                continue;
-                            }
-
-                            app.git.commit_staged(&message).await?;
-                            let (_, files) = if let Some(snapshot) = app.session_snapshot.as_ref() {
-                                app.git.collect_session_diff(snapshot).await?
-                            } else {
-                                app.git.collect_diff().await?
-                            };
-                            app.review.files = files;
-                            app.review.cursor_file = 0;
-                            app.review.cursor_hunk = 0;
-                            app.review.focus = ReviewFocus::Files;
-                            app.overlay = Overlay::None;
-                            app.status = "Committed accepted changes.".to_string();
-                            commit_message = TextArea::default();
-                            commit_message
-                                .set_placeholder_text("Write the commit message for accepted changes");
+                            commit_message.input(to_textarea_input(key));
                         }
                         _ => {
                             commit_message.input(to_textarea_input(key));
@@ -1206,6 +1234,8 @@ fn draw_composer(frame: &mut ratatui::Frame, area: Rect, app: &App, composer: &T
             Span::raw(" models   "),
             Span::styled("Ctrl+T", styles::keybind()),
             Span::raw(" variant   "),
+            Span::styled("Ctrl+S", styles::keybind()),
+            Span::raw(" run   "),
             Span::styled("Esc", styles::keybind()),
             Span::raw(" close"),
         ])])
@@ -1216,7 +1246,9 @@ fn draw_composer(frame: &mut ratatui::Frame, area: Rect, app: &App, composer: &T
     frame.render_widget(
         Paragraph::new(vec![Line::from(vec![
             Span::styled("Enter", styles::keybind()),
-            Span::raw(" run"),
+            Span::raw(" newline   "),
+            Span::styled("Up/Down", styles::keybind()),
+            Span::raw(" move"),
         ])])
         .style(styles::muted()),
         lines[3],
@@ -1263,8 +1295,10 @@ fn draw_commit_prompt(
     frame.render_widget(
         Paragraph::new(vec![Line::from(vec![
             Span::raw("Commit prompt active  |  "),
-            Span::styled("Enter", styles::keybind()),
+            Span::styled("Ctrl+S", styles::keybind()),
             Span::raw(" commit  |  "),
+            Span::styled("Enter", styles::keybind()),
+            Span::raw(" newline  |  "),
             Span::styled("Esc", styles::keybind()),
             Span::raw(" close"),
         ])])
