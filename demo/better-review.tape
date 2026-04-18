@@ -16,7 +16,8 @@ Set Margin 16
 Set MarginFill "#11111b"
 Set BorderRadius 8
 Set CursorBlink false
-Set TypingSpeed 35ms
+Set TypingSpeed 45ms
+Set PlaybackSpeed 0.92
 Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
 
@@ -28,31 +29,35 @@ Show
 
 Sleep 1s
 Ctrl+O
+Wait+Screen /New Prompt/
+Sleep 800ms
+Type "Refine greeting text, update footer copy, and add a review queue helper."
 Sleep 500ms
-Type "Tighten the greeting, update the footer copy, and add a review queue helper."
-Sleep 400ms
 Enter
+Sleep 1200ms
 Wait+Screen /Reviewing files/
 
-Sleep 1s
+Sleep 900ms
 Enter
 Wait+Screen /Inspecting hunks/
-Sleep 500ms
+Sleep 1000ms
 Escape
 Wait+Screen /Reviewing files/
-Sleep 500ms
+Sleep 700ms
 Type "y"
+Wait+Screen /\[✓\] src\/lib\.rs/
 Sleep 800ms
 Type "j"
-Sleep 500ms
+Sleep 600ms
 Type "x"
-Sleep 900ms
+Wait+Screen /\[x\] src\/review_queue\.rs/
+Sleep 850ms
 Type "c"
 Wait+Screen /Commit prompt active/
-Sleep 500ms
+Sleep 700ms
 Type "feat: commit accepted review changes"
-Sleep 300ms
+Sleep 450ms
 Enter
-Sleep 2s
+Sleep 1800ms
 Ctrl+C
-Sleep 500ms
+Sleep 400ms

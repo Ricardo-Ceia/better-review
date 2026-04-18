@@ -38,6 +38,8 @@ EOF
       exit 1
     fi
 
+    sleep 0.8
+
     cat >"$repo_path/src/lib.rs" <<'EOF'
 pub fn greeting(name: &str) -> String {
     format!("Hello, {name}. Review before you commit.")
