@@ -16,13 +16,13 @@ Set Margin 16
 Set MarginFill "#11111b"
 Set BorderRadius 8
 Set CursorBlink false
-Set TypingSpeed 45ms
+Set TypingSpeed 20ms
 Set PlaybackSpeed 0.92
 Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
 
 Hide
-Type "./demo/run-demo.sh"
+Type "./run-demo.sh"
 Enter
 Wait+Screen /demo\/mock-model \[balanced\]/
 Show
