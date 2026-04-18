@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -62,6 +62,7 @@ struct App {
     selected_variant: Option<String>,
     session_snapshot: Option<WorkspaceSnapshot>,
     review_busy: bool,
+    started_at: Instant,
     tx: mpsc::UnboundedSender<Message>,
     rx: mpsc::UnboundedReceiver<Message>,
 }
@@ -135,6 +136,7 @@ impl App {
             selected_variant: None,
             session_snapshot: None,
             review_busy: false,
+            started_at: Instant::now(),
             tx,
             rx,
         };
@@ -755,7 +757,7 @@ fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     };
 
     let counts = app.review_counts();
-    let mut header_spans = brand_lockup_spans();
+    let mut header_spans = compact_brand_lockup_spans();
     header_spans.extend([
         Span::raw("   "),
         Span::styled(
@@ -844,20 +846,17 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .split(inner);
 
     frame.render_widget(
-        Paragraph::new(pixel_logo_lines())
+        Paragraph::new(animated_logo_lines(app.started_at))
             .alignment(Alignment::Center)
             .style(styles::title()),
         sections[0],
     );
 
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled("better-review", styles::title())),
-            Line::from(Span::styled(
-                "Review agent changes with intent.",
-                styles::muted(),
-            )),
-        ])
+        Paragraph::new(vec![Line::from(Span::styled(
+            "Review agent changes with intent.",
+            styles::muted(),
+        ))])
         .alignment(Alignment::Center),
         sections[1],
     );
@@ -1351,48 +1350,72 @@ fn cycle_variant(app: &mut App, direction: isize) {
 }
 
 fn brand_lockup_spans() -> Vec<Span<'static>> {
-    let mut spans = compact_brand_lockup_spans();
-    spans.insert(0, Span::styled("◢", styles::title()));
-    spans.insert(1, Span::raw(" "));
-    spans
-}
-
-fn compact_brand_lockup_spans() -> Vec<Span<'static>> {
     vec![
         Span::styled(
-            "▛",
+            "better",
             Style::default()
-                .fg(styles::ACCENT)
+                .fg(styles::TEXT_PRIMARY)
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled("-", styles::muted()),
         Span::styled(
-            "▌",
+            "review",
             Style::default()
-                .fg(styles::SUCCESS)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "▜",
-            Style::default()
-                .fg(styles::ACCENT)
+                .fg(styles::TEXT_PRIMARY)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled("better-review", styles::title()),
+        Span::styled(lens_frame().0, styles::subtle()),
+        Span::styled(lens_frame().1, styles::title()),
+        Span::styled(lens_frame().2, styles::subtle()),
     ]
 }
 
-fn pixel_logo_lines() -> Vec<Line<'static>> {
+fn compact_brand_lockup_spans() -> Vec<Span<'static>> {
+    brand_lockup_spans()
+}
+
+fn animated_logo_lines(started_at: Instant) -> Vec<Line<'static>> {
+    let frame = lens_animation_frame(started_at);
     vec![
-        Line::from(Span::raw("  ██      ██████   ███████  ██      ██      ")),
-        Line::from(Span::raw("  ██      ██  ██   ██       ██      ██      ")),
-        Line::from(Span::raw("  ██      ██████   █████    ██      ██      ")),
-        Line::from(Span::raw("  ██      ██  ██   ██       ██      ██      ")),
-        Line::from(Span::raw("  ██████  ██  ██   ███████  ██████  ██████  ")),
+        Line::from(Span::styled("", styles::title())),
+        Line::from(vec![
+            Span::styled("        better-review", styles::title()),
+            Span::raw("   "),
+            Span::styled(frame.0, styles::subtle()),
+            Span::styled(frame.1, styles::title()),
+            Span::styled(frame.2, styles::subtle()),
+        ]),
         Line::from(Span::raw("")),
-        Line::from(Span::styled("         ▛▀▜      review with intent", styles::muted())),
-        Line::from(Span::styled("         ▌▟      accept only what you trust", styles::muted())),
+        Line::from(Span::styled(
+            "             inspect  decide  trust",
+            styles::muted(),
+        )),
+        Line::from(Span::raw("")),
+        Line::from(Span::styled(
+            "             a moving lens that resolves to check",
+            styles::subtle(),
+        )),
     ]
+}
+
+fn lens_animation_frame(started_at: Instant) -> (&'static str, &'static str, &'static str) {
+    let frames = [
+        ("(", ".", ")"),
+        ("(", "o", ")"),
+        ("<", "o", ")"),
+        ("<", "O", ">"),
+        ("<", "o", ">"),
+        ("(", "o", ">"),
+        ("(", ".", ")"),
+        ("[", "✓", "]"),
+    ];
+    let tick = started_at.elapsed().as_millis() / 140;
+    frames[(tick as usize) % frames.len()]
+}
+
+fn lens_frame() -> (&'static str, &'static str, &'static str) {
+    ("[", "◌", "]")
 }
 
 fn to_textarea_input(key: KeyEvent) -> tui_textarea::Input {
