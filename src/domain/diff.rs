@@ -99,3 +99,30 @@ impl FileDiff {
         };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{FileDiff, ReviewStatus};
+
+    #[test]
+    fn display_path_falls_back_to_old_path_for_deleted_file() {
+        let file = FileDiff {
+            old_path: "removed.txt".to_string(),
+            new_path: String::new(),
+            ..FileDiff::default()
+        };
+
+        assert_eq!(file.display_path(), "removed.txt");
+    }
+
+    #[test]
+    fn sync_review_status_keeps_state_when_no_hunks() {
+        let mut file = FileDiff {
+            review_status: ReviewStatus::Accepted,
+            ..FileDiff::default()
+        };
+
+        file.sync_review_status();
+        assert_eq!(file.review_status, ReviewStatus::Accepted);
+    }
+}

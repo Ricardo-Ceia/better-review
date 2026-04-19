@@ -42,3 +42,52 @@ pub fn muted() -> Style {
 pub fn subtle() -> Style {
     Style::default().fg(TEXT_SUBTLE)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_bold(style: Style) {
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn title_style_matches_palette() {
+        let style = title();
+        assert_eq!(style.fg, Some(TEXT_PRIMARY));
+        assert_bold(style);
+    }
+
+    #[test]
+    fn accent_bold_style_matches_palette() {
+        let style = accent_bold();
+        assert_eq!(style.fg, Some(ACCENT_BRIGHT));
+        assert_bold(style);
+    }
+
+    #[test]
+    fn keybind_style_matches_palette() {
+        let style = keybind();
+        assert_eq!(style.fg, Some(ACCENT_BRIGHT));
+        assert_bold(style);
+    }
+
+    #[test]
+    fn soft_accent_style_matches_palette() {
+        let style = soft_accent();
+        assert_eq!(style.fg, Some(ACCENT));
+        assert!(!style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn muted_style_matches_palette() {
+        let style = muted();
+        assert_eq!(style.fg, Some(TEXT_MUTED));
+    }
+
+    #[test]
+    fn subtle_style_matches_palette() {
+        let style = subtle();
+        assert_eq!(style.fg, Some(TEXT_SUBTLE));
+    }
+}

@@ -234,6 +234,58 @@ Binary files a/assets/logo.png and b/assets/logo.png differ
     }
 
     #[test]
+    fn parses_deleted_file_status() {
+        let diff = r#"diff --git a/obsolete.txt b/obsolete.txt
+deleted file mode 100644
+--- a/obsolete.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-remove me
+"#;
+
+        let files = parse_git_diff(diff).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::Deleted);
+        assert_eq!(files[0].old_path, "obsolete.txt");
+        assert_eq!(files[0].new_path, "");
+        assert_eq!(files[0].hunks.len(), 1);
+    }
+
+    #[test]
+    fn parses_git_binary_patch_header() {
+        let diff = r#"diff --git a/bin/data.bin b/bin/data.bin
+new file mode 100644
+index 0000000..1111111
+GIT binary patch
+literal 4
+KcmZQz00d0D2LJ>B
+"#;
+
+        let files = parse_git_diff(diff).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].is_binary);
+        assert_eq!(files[0].status, FileStatus::Added);
+    }
+
+    #[test]
+    fn parses_default_hunk_counts_without_explicit_lengths() {
+        let diff = r#"diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -3 +3 @@
+-old
++new
+"#;
+
+        let files = parse_git_diff(diff).unwrap();
+        let hunk = &files[0].hunks[0];
+        assert_eq!(hunk.old_start, 3);
+        assert_eq!(hunk.old_count, 1);
+        assert_eq!(hunk.new_start, 3);
+        assert_eq!(hunk.new_count, 1);
+    }
+
+    #[test]
     fn parses_no_newline_markers() {
         let diff = r#"diff --git a/readme.txt b/readme.txt
 --- a/readme.txt

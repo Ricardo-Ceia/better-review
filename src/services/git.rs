@@ -355,6 +355,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reject_file_marks_status_rejected_and_unstages() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        write_file(temp.path(), "tracked.txt", "changed\n").await?;
+        let service = GitService::new(temp.path());
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked file in diff");
+
+        service.accept_file(file).await?;
+        assert!(service.has_staged_changes().await?);
+        service.reject_file_in_place(file).await?;
+
+        assert_eq!(file.review_status, ReviewStatus::Rejected);
+        assert!(
+            file.hunks
+                .iter()
+                .all(|hunk| hunk.review_status == ReviewStatus::Rejected)
+        );
+        assert!(!service.has_staged_changes().await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unstage_file_marks_status_unreviewed() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        write_file(temp.path(), "tracked.txt", "changed\n").await?;
+        let service = GitService::new(temp.path());
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked file in diff");
+
+        service.accept_file(file).await?;
+        assert!(service.has_staged_changes().await?);
+        service.unstage_file_in_place(file).await?;
+
+        assert_eq!(file.review_status, ReviewStatus::Unreviewed);
+        assert!(
+            file.hunks
+                .iter()
+                .all(|hunk| hunk.review_status == ReviewStatus::Unreviewed)
+        );
+        assert!(!service.has_staged_changes().await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn patch_from_hunk_uses_dev_null_for_added_file() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        let service = GitService::new(temp.path());
+
+        write_file(temp.path(), "new.txt", "hello\n").await?;
+        let (_, files) = service.collect_diff().await?;
+        let file = files
+            .iter()
+            .find(|file| file.display_path() == "new.txt")
+            .expect("new file in diff");
+        let patch = super::patch_from_hunk(file, &file.hunks[0]);
+
+        assert!(patch.contains("--- /dev/null"));
+        assert!(patch.contains("+++ b/new.txt"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn patch_from_hunk_uses_dev_null_for_deleted_file() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "gone.txt", "bye\n").await?;
+        git(temp.path(), &["add", "gone.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "add file"]).await?;
+
+        let service = GitService::new(temp.path());
+        git(temp.path(), &["rm", "gone.txt"]).await?;
+
+        let (_, files) = service.collect_diff().await?;
+        let file = files
+            .iter()
+            .find(|file| file.old_path == "gone.txt" && file.new_path.is_empty())
+            .expect("deleted file in diff");
+        let patch = super::patch_from_hunk(file, &file.hunks[0]);
+
+        assert!(patch.contains("--- a/gone.txt"));
+        assert!(patch.contains("+++ /dev/null"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sync_file_hunks_rewrites_partially_staged_file_from_review_state() -> Result<()> {
         let temp = tempfile::tempdir()?;
         init_repo(temp.path()).await?;
@@ -436,6 +538,35 @@ mod tests {
                 || message.contains("unresolved conflict")
                 || message.contains("resolve"),
             "unexpected commit error: {message}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_staged_fails_with_empty_message() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "tracked.txt", "base\n").await?;
+        git(temp.path(), &["add", "tracked.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        let service = GitService::new(temp.path());
+        write_file(temp.path(), "tracked.txt", "changed\n").await?;
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.display_path() == "tracked.txt")
+            .expect("tracked file in diff");
+        service.accept_file(file).await?;
+
+        let err = service
+            .commit_staged("")
+            .await
+            .expect_err("empty commit message must fail");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("empty") || message.contains("message"),
+            "unexpected commit message error: {message}"
         );
         Ok(())
     }

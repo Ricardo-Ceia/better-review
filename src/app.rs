@@ -1073,3 +1073,250 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         ])
         .split(popup_layout[1])[1]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::diff::{DiffLine, DiffLineKind, FileDiff, FileStatus, Hunk, ReviewStatus};
+
+    fn sample_file() -> FileDiff {
+        FileDiff {
+            new_path: "src/lib.rs".to_string(),
+            status: FileStatus::Modified,
+            hunks: vec![
+                Hunk {
+                    header: "@@ -1,2 +1,2 @@".to_string(),
+                    old_start: 1,
+                    old_count: 2,
+                    new_start: 1,
+                    new_count: 2,
+                    lines: vec![
+                        DiffLine {
+                            kind: DiffLineKind::Remove,
+                            content: "old".to_string(),
+                            old_line: Some(1),
+                            new_line: None,
+                        },
+                        DiffLine {
+                            kind: DiffLineKind::Add,
+                            content: "new".to_string(),
+                            old_line: None,
+                            new_line: Some(1),
+                        },
+                    ],
+                    review_status: ReviewStatus::Unreviewed,
+                },
+                Hunk {
+                    header: "@@ -10,1 +10,1 @@".to_string(),
+                    old_start: 10,
+                    old_count: 1,
+                    new_start: 10,
+                    new_count: 1,
+                    lines: vec![DiffLine {
+                        kind: DiffLineKind::Context,
+                        content: "ctx".to_string(),
+                        old_line: Some(10),
+                        new_line: Some(10),
+                    }],
+                    review_status: ReviewStatus::Accepted,
+                },
+            ],
+            review_status: ReviewStatus::Unreviewed,
+            ..FileDiff::default()
+        }
+    }
+
+    #[test]
+    fn review_counts_aggregate_file_and_hunk_statuses() {
+        let mut app = App {
+            repo_path: PathBuf::from("."),
+            git: GitService::new("."),
+            status: String::new(),
+            screen: Screen::Home,
+            review: ReviewUiState {
+                files: vec![
+                    sample_file(),
+                    FileDiff {
+                        new_path: "README.md".to_string(),
+                        review_status: ReviewStatus::Rejected,
+                        ..FileDiff::default()
+                    },
+                ],
+                ..ReviewUiState::default()
+            },
+            overlay: Overlay::None,
+            had_staged_changes_on_open: false,
+            review_busy: false,
+            logo_animation: AnimatedTextState::with_interval(120),
+            tx: mpsc::unbounded_channel().0,
+            rx: mpsc::unbounded_channel().1,
+        };
+
+        let counts = app.review_counts();
+        assert_eq!(counts.unreviewed, 1);
+        assert_eq!(counts.accepted, 1);
+        assert_eq!(counts.rejected, 1);
+
+        app.review.files[0].set_all_hunks_status(ReviewStatus::Accepted);
+        let counts = app.review_counts();
+        assert_eq!(counts.unreviewed, 0);
+        assert_eq!(counts.accepted, 2);
+    }
+
+    #[test]
+    fn new_commit_message_input_sets_placeholder_and_wrap() {
+        let input = new_commit_message_input();
+        assert_eq!(input.lines(), vec![String::new()]);
+    }
+
+    #[test]
+    fn review_render_helpers_track_hunk_positions() {
+        let file = sample_file();
+        assert_eq!(review_render_line_count(&file), 8);
+        assert_eq!(hunk_line_start(&file, 0), 1);
+        assert_eq!(hunk_line_start(&file, 1), 5);
+        assert_eq!(hunk_index_for_line(&file, 0), 0);
+        assert_eq!(hunk_index_for_line(&file, 2), 0);
+        assert_eq!(hunk_index_for_line(&file, 5), 1);
+        assert_eq!(hunk_index_for_line(&file, 99), 1);
+    }
+
+    #[test]
+    fn sync_cursor_line_to_hunk_clamps_indices() {
+        let mut review = ReviewUiState {
+            files: vec![sample_file()],
+            cursor_file: 0,
+            cursor_hunk: 99,
+            cursor_line: 0,
+            focus: ReviewFocus::Files,
+        };
+
+        sync_cursor_line_to_hunk(&mut review);
+        assert_eq!(review.cursor_hunk, 1);
+        assert_eq!(review.cursor_line, 5);
+    }
+
+    #[test]
+    fn sync_cursor_line_to_hunk_handles_empty_hunks() {
+        let mut review = ReviewUiState {
+            files: vec![FileDiff::default()],
+            cursor_file: 0,
+            cursor_hunk: 3,
+            cursor_line: 7,
+            focus: ReviewFocus::Files,
+        };
+
+        sync_cursor_line_to_hunk(&mut review);
+        assert_eq!(review.cursor_hunk, 0);
+        assert_eq!(review.cursor_line, 0);
+    }
+
+    #[test]
+    fn move_review_cursor_by_line_updates_current_hunk() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut app = App {
+            repo_path: PathBuf::from("."),
+            git: GitService::new("."),
+            status: String::new(),
+            screen: Screen::Review,
+            review: ReviewUiState {
+                files: vec![sample_file()],
+                cursor_file: 0,
+                cursor_hunk: 0,
+                cursor_line: 1,
+                focus: ReviewFocus::Hunks,
+            },
+            overlay: Overlay::None,
+            had_staged_changes_on_open: false,
+            review_busy: false,
+            logo_animation: AnimatedTextState::with_interval(120),
+            tx,
+            rx,
+        };
+
+        move_review_cursor_by_line(&mut app, 4);
+        assert_eq!(app.review.cursor_line, 5);
+        assert_eq!(app.review.cursor_hunk, 1);
+
+        move_review_cursor_by_line(&mut app, -99);
+        assert_eq!(app.review.cursor_line, 0);
+        assert_eq!(app.review.cursor_hunk, 0);
+    }
+
+    #[test]
+    fn review_marker_and_path_helpers_match_expected_output() {
+        assert_eq!(review_marker(ReviewStatus::Accepted, FileStatus::Modified, false), "[✓]");
+        assert_eq!(review_marker(ReviewStatus::Rejected, FileStatus::Modified, false), "[x]");
+        assert_eq!(review_marker(ReviewStatus::Unreviewed, FileStatus::Added, false), "[+]");
+        assert_eq!(review_marker(ReviewStatus::Unreviewed, FileStatus::Deleted, false), "[-]");
+        assert_eq!(review_marker(ReviewStatus::Unreviewed, FileStatus::Modified, true), "[ ]");
+        assert_eq!(truncate_path("short.rs", 20), "short.rs");
+        assert_eq!(truncate_path("very/long/path/file.rs", 10), "...file.rs");
+    }
+
+    #[test]
+    fn brand_helpers_and_centered_rect_behave_consistently() {
+        let mut animation = AnimatedTextState::with_interval(120);
+        animation.frame = 0;
+        assert_eq!(current_brand_icon(&animation), BRAND_ICON);
+        animation.frame = 128;
+        assert_eq!(current_brand_icon(&animation), BRAND_ICON_ALT);
+        assert!(brand_lockup_width() > BRAND_WORDMARK.len() as u16);
+
+        let rect = centered_rect(50, 40, Rect::new(0, 0, 100, 50));
+        assert_eq!(rect.width, 50);
+        assert_eq!(rect.height, 20);
+        assert_eq!(rect.x, 25);
+        assert_eq!(rect.y, 15);
+    }
+
+    #[test]
+    fn diff_scroll_offset_respects_focus_and_window() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let app = App {
+            repo_path: PathBuf::from("."),
+            git: GitService::new("."),
+            status: String::new(),
+            screen: Screen::Review,
+            review: ReviewUiState {
+                files: vec![sample_file()],
+                cursor_file: 0,
+                cursor_hunk: 1,
+                cursor_line: 6,
+                focus: ReviewFocus::Hunks,
+            },
+            overlay: Overlay::None,
+            had_staged_changes_on_open: false,
+            review_busy: false,
+            logo_animation: AnimatedTextState::with_interval(120),
+            tx,
+            rx,
+        };
+
+        let lines = vec![
+            Line::raw("0"),
+            Line::raw("1"),
+            Line::raw("2"),
+            Line::raw("3"),
+            Line::raw("4"),
+            Line::raw("5"),
+            Line::raw("6"),
+        ];
+        assert_eq!(diff_scroll_offset(&app, Rect::new(0, 0, 10, 4), &lines), 5_u16.min(3));
+
+        let mut files_view = app;
+        files_view.review.focus = ReviewFocus::Files;
+        assert_eq!(diff_scroll_offset(&files_view, Rect::new(0, 0, 10, 4), &lines), 0);
+    }
+
+    #[test]
+    fn to_textarea_input_maps_keys_and_modifiers() {
+        let mapped = to_textarea_input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(mapped.ctrl);
+        assert!(!mapped.alt);
+        assert!(!mapped.shift);
+
+        let mapped = to_textarea_input(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert!(mapped.shift);
+    }
+}
