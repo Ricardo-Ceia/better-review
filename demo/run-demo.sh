@@ -3,10 +3,7 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 binary_path="$root_dir/target/debug/better-review"
-
-if [[ ! -x "$binary_path" ]]; then
-  cargo build --quiet --manifest-path "$root_dir/Cargo.toml" --bin better-review
-fi
+cargo build --quiet --manifest-path "$root_dir/Cargo.toml" --bin better-review
 
 demo_root="$(mktemp -d "${TMPDIR:-/tmp}/better-review-demo.XXXXXX")"
 cleanup() {
@@ -26,4 +23,5 @@ git -C "$demo_root/repo" add .
 git -C "$demo_root/repo" commit -qm "Initial commit"
 
 cd "$demo_root/repo"
+printf 'better-review demo repo\n'
 PATH="$demo_root/bin:$PATH" "$binary_path"

@@ -22,27 +22,23 @@ Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
 
 Hide
-Type "./run-demo.sh"
+Type "./demo/run-demo.sh"
 Enter
-Wait+Screen /demo\/mock-model \[balanced\]/
+Wait+Screen /better-review demo repo/
 Show
 
 Sleep 1000ms
-Ctrl+O
-Wait+Screen /New Prompt/
-Sleep 1s
-Type "Refine greeting text, update footer copy, and add a review queue helper."
-Sleep 700ms
-Enter
-Sleep 1200ms
-Wait+Screen /Reviewing files/
+Type "o"
+Wait+Screen /demo\/mock-opencode/
+Sleep 5200ms
+Wait+Screen /reviewing files/
 
 Sleep 900ms
 Enter
-Wait+Screen /Inspecting hunks/
+Wait+Screen /inspecting hunks/
 Sleep 1000ms
 Escape
-Wait+Screen /Reviewing files/
+Wait+Screen /reviewing files/
 Sleep 900ms
 Type "y"
 Wait+Screen /\[✓\] src\/lib\.rs/

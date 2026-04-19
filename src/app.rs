@@ -8,8 +8,6 @@ use crossterm::terminal::{
     Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
     enable_raw_mode,
 };
-use fuzzy_matcher::FuzzyMatcher;
-use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -22,10 +20,9 @@ use ratatui_textarea::{TextArea, WrapMode};
 use tokio::sync::mpsc;
 
 use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
-use crate::domain::model_catalog::ModelOption;
 use crate::domain::session::WorkspaceSnapshot;
 use crate::services::git::GitService;
-use crate::services::opencode::{OpencodeService, RunResult};
+use crate::services::opencode::OpencodeService;
 use crate::ui::styles;
 
 pub async fn run() -> Result<()> {
@@ -55,13 +52,9 @@ struct App {
     git: GitService,
     opencode: OpencodeService,
     status: String,
-    run_state: RunState,
     screen: Screen,
     review: ReviewUiState,
     overlay: Overlay,
-    models: Vec<ModelOption>,
-    selected_model: Option<String>,
-    selected_variant: Option<String>,
     session_snapshot: Option<WorkspaceSnapshot>,
     review_busy: bool,
     logo_animation: AnimatedTextState,
@@ -69,18 +62,9 @@ struct App {
     rx: mpsc::UnboundedReceiver<Message>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunState {
-    Ready,
-    Running,
-    Failed,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Overlay {
     None,
-    Composer,
-    ModelPicker,
     CommitPrompt,
 }
 
@@ -97,7 +81,6 @@ struct ReviewUiState {
     cursor_hunk: usize,
     cursor_line: usize,
     focus: ReviewFocus,
-    session_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -108,8 +91,6 @@ enum ReviewFocus {
 }
 
 enum Message {
-    ModelsLoaded(Result<Vec<ModelOption>, String>),
-    PromptFinished(Result<RunResult, String>),
     HunkSyncFinished {
         file_index: usize,
         original_file: FileDiff,
@@ -129,14 +110,10 @@ impl App {
             repo_path,
             git,
             opencode,
-            status: "Press Ctrl+O to open the composer.".to_string(),
-            run_state: RunState::Ready,
+            status: "Press o to open opencode.".to_string(),
             screen: Screen::Home,
             review: ReviewUiState::default(),
             overlay: Overlay::None,
-            models: Vec::new(),
-            selected_model: None,
-            selected_variant: None,
             session_snapshot: None,
             review_busy: false,
             logo_animation: AnimatedTextState::with_interval(120),
@@ -150,44 +127,8 @@ impl App {
     async fn load_initial_state(&mut self) -> Result<()> {
         let (_, files) = self.git.collect_diff().await?;
         self.review.files = files;
-        self.review.session_only = false;
-
-        let tx = self.tx.clone();
-        let service = self.opencode.clone();
-        tokio::spawn(async move {
-            let result = service.load_models().await.map_err(|err| err.to_string());
-            let _ = tx.send(Message::ModelsLoaded(result));
-        });
 
         Ok(())
-    }
-
-    fn current_model_label(&self) -> String {
-        let Some(selected_model) = self.selected_model.as_ref() else {
-            return "loading...".to_string();
-        };
-
-        let Some(model) = self
-            .models
-            .iter()
-            .find(|option| &option.id == selected_model)
-        else {
-            return sanitize_model_display(selected_model);
-        };
-
-        let name = sanitize_model_display(&model.name);
-        match self.selected_variant.as_deref().map(sanitize_variant_display) {
-            Some(variant) if !variant.is_empty() => format!("{name} [{variant}]"),
-            _ => name,
-        }
-    }
-
-    fn selected_model_variants(&self) -> Vec<String> {
-        self.models
-            .iter()
-            .find(|model| Some(&model.id) == self.selected_model.as_ref())
-            .map(|model| model.variants.clone())
-            .unwrap_or_default()
     }
 
     fn current_file_path(&self) -> Option<&str> {
@@ -201,6 +142,14 @@ impl App {
         self.session_snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.has_unstaged_path(path))
+    }
+
+    fn review_scope_label(&self) -> &'static str {
+        if self.session_snapshot.is_some() {
+            "session"
+        } else {
+            "workspace"
+        }
     }
 
     fn review_counts(&self) -> ReviewCounts {
@@ -259,55 +208,11 @@ impl ReviewCounts {
     }
 }
 
-fn new_composer_input() -> TextArea<'static> {
-    let mut composer = TextArea::default();
-    composer.set_placeholder_text("Describe the change you want opencode to make");
-    composer.set_wrap_mode(WrapMode::WordOrGlyph);
-    composer
-}
-
 fn new_commit_message_input() -> TextArea<'static> {
     let mut commit_message = TextArea::default();
     commit_message.set_placeholder_text("Write the commit message for accepted changes");
     commit_message.set_wrap_mode(WrapMode::WordOrGlyph);
     commit_message
-}
-
-async fn submit_composer_prompt(app: &mut App, composer: &mut TextArea<'static>) -> Result<()> {
-    if app.run_state == RunState::Running {
-        return Ok(());
-    }
-    let prompt = composer.lines().join("\n").trim().to_string();
-    if prompt.is_empty() {
-        app.status = "Write a prompt first.".to_string();
-        return Ok(());
-    }
-
-    app.run_state = RunState::Running;
-    app.status = format!("Running opencode with {}...", app.current_model_label());
-    let tx = app.tx.clone();
-    let service = app.opencode.clone();
-    let git = app.git.clone();
-    let model = app.selected_model.clone();
-    let variant = app.selected_variant.clone();
-    let snapshot = git.snapshot_workspace().await?;
-    app.session_snapshot = Some(snapshot.clone());
-    *composer = new_composer_input();
-    tokio::spawn(async move {
-        let result = service
-            .run_prompt(
-                &git,
-                &snapshot,
-                &prompt,
-                model.as_deref(),
-                variant.as_deref(),
-            )
-            .await
-            .map_err(|err| err.to_string());
-        let _ = tx.send(Message::PromptFinished(result));
-    });
-
-    Ok(())
 }
 
 async fn submit_commit_message(app: &mut App, commit_message: &mut TextArea<'static>) -> Result<()> {
@@ -333,6 +238,73 @@ async fn submit_commit_message(app: &mut App, commit_message: &mut TextArea<'sta
     }
 
     app.git.commit_staged(&message).await?;
+    refresh_review_files(app).await?;
+    app.overlay = Overlay::None;
+    app.status = "Committed accepted changes.".to_string();
+    *commit_message = new_commit_message_input();
+
+    Ok(())
+}
+
+async fn open_opencode_handoff(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+) -> Result<()> {
+    if app.review_busy {
+        app.status = "Wait for the current review update to finish.".to_string();
+        return Ok(());
+    }
+
+    if app.session_snapshot.is_none() {
+        app.session_snapshot = Some(app.git.snapshot_workspace().await?);
+    }
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    let handoff_result = app.opencode.launch_interactive().await;
+
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        TerminalClear(ClearType::All),
+        TerminalClear(ClearType::Purge)
+    )?;
+    terminal.hide_cursor()?;
+
+    match handoff_result {
+        Ok(status) => {
+            refresh_review_files(app).await?;
+            app.status = if app.review.files.is_empty() {
+                if status.success() {
+                    "Returned from opencode. No reviewable changes yet.".to_string()
+                } else {
+                    "Opencode exited without new reviewable changes.".to_string()
+                }
+            } else if status.success() {
+                format!(
+                    "Returned from opencode. Review {} changed file(s).",
+                    app.review.files.len()
+                )
+            } else {
+                format!(
+                    "Opencode exited. Review {} changed file(s).",
+                    app.review.files.len()
+                )
+            };
+        }
+        Err(err) => {
+            app.status = format!("Could not open opencode: {err}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn refresh_review_files(app: &mut App) -> Result<()> {
     let (_, files) = if let Some(snapshot) = app.session_snapshot.as_ref() {
         app.git.collect_session_diff(snapshot).await?
     } else {
@@ -343,21 +315,17 @@ async fn submit_commit_message(app: &mut App, commit_message: &mut TextArea<'sta
     app.review.cursor_hunk = 0;
     app.review.cursor_line = 0;
     app.review.focus = ReviewFocus::Files;
-    app.overlay = Overlay::None;
-    app.status = "Committed accepted changes.".to_string();
-    *commit_message = new_commit_message_input();
-
+    app.screen = if app.review.files.is_empty() {
+        Screen::Home
+    } else {
+        Screen::Review
+    };
     Ok(())
 }
 
 async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
     let mut app = App::new().await?;
-    let matcher = SkimMatcherV2::default();
-    let mut composer = new_composer_input();
     let mut commit_message = new_commit_message_input();
-    let mut model_search = TextArea::default();
-    model_search.set_placeholder_text("Search by provider or model");
-    let mut model_cursor = 0_usize;
 
     loop {
         app.logo_animation
@@ -365,51 +333,6 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
 
         while let Ok(message) = app.rx.try_recv() {
             match message {
-                Message::ModelsLoaded(result) => match result {
-                    Ok(models) => {
-                        app.models = models;
-                        if app.selected_model.is_none() {
-                            if let Some(first) = app.models.first() {
-                                app.selected_model = Some(first.id.clone());
-                                app.selected_variant = first.variants.first().cloned();
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        app.status = format!("Could not load opencode models: {err}");
-                        app.run_state = RunState::Failed;
-                    }
-                },
-                Message::PromptFinished(result) => match result {
-                    Ok(run) => {
-                        app.review.files = run.changed_files;
-                        app.review.cursor_file = 0;
-                        app.review.cursor_hunk = 0;
-                        app.review.cursor_line = 0;
-                        app.review.focus = ReviewFocus::Files;
-                        app.review.session_only = app.session_snapshot.is_some();
-                        app.screen = if app.review.files.is_empty() {
-                            Screen::Home
-                        } else {
-                            Screen::Review
-                        };
-                        app.status = if app.review.files.is_empty() {
-                            "Run finished with no code changes.".to_string()
-                        } else {
-                            format!(
-                                "Run finished. Review {} changed file(s).",
-                                app.review.files.len()
-                            )
-                        };
-                        app.run_state = RunState::Ready;
-                        app.overlay = Overlay::None;
-                    }
-                    Err(err) => {
-                        app.status = err;
-                        app.run_state = RunState::Failed;
-                        app.overlay = Overlay::None;
-                    }
-                },
                 Message::HunkSyncFinished {
                     file_index,
                     original_file,
@@ -439,11 +362,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
             draw(
                 frame,
                 &app,
-                &composer,
                 &commit_message,
-                &model_search,
-                &matcher,
-                model_cursor,
             )
         })?;
 
@@ -454,54 +373,6 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                 }
 
                 match app.overlay {
-                    Overlay::Composer => match key.code {
-                        KeyCode::Esc => {
-                            app.overlay = Overlay::None;
-                            app.status =
-                                "Review remains active. Press Ctrl+O for a new prompt.".to_string();
-                        }
-                        KeyCode::Tab => {
-                            app.overlay = Overlay::ModelPicker;
-                        }
-                        KeyCode::Enter => {
-                            submit_composer_prompt(&mut app, &mut composer).await?;
-                        }
-                        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            cycle_variant(&mut app, 1);
-                        }
-                        _ => {
-                            composer.input(to_textarea_input(key));
-                        }
-                    },
-                    Overlay::ModelPicker => {
-                        let filtered = filtered_models(
-                            &app.models,
-                            &matcher,
-                            &model_search.lines().join("\n"),
-                        );
-                        match key.code {
-                            KeyCode::Esc => app.overlay = Overlay::Composer,
-                            KeyCode::Up => model_cursor = model_cursor.saturating_sub(1),
-                            KeyCode::Down => {
-                                if model_cursor + 1 < filtered.len() {
-                                    model_cursor += 1;
-                                }
-                            }
-                            KeyCode::Enter => {
-                                if let Some(selected) = filtered.get(model_cursor) {
-                                    app.selected_model = Some(selected.id.clone());
-                                    app.selected_variant = selected.variants.first().cloned();
-                                    app.overlay = Overlay::Composer;
-                                    app.status =
-                                        format!("Selected model {}.", app.current_model_label());
-                                }
-                            }
-                            _ => {
-                                model_search.input(to_textarea_input(key));
-                                model_cursor = 0;
-                            }
-                        }
-                    }
                     Overlay::CommitPrompt => match key.code {
                         KeyCode::Esc => {
                             app.overlay = Overlay::None;
@@ -515,18 +386,39 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         }
                     },
                     Overlay::None => {
-                        if key.code == KeyCode::Char('o')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            app.overlay = Overlay::Composer;
-                            app.status = "Compose a new prompt.".to_string();
+                        if key.code == KeyCode::Char('o') {
+                            open_opencode_handoff(terminal, &mut app).await?;
+                            continue;
+                        }
+
+                        if key.code == KeyCode::Char('r') {
+                            refresh_review_files(&mut app).await?;
+                            app.status = if app.review.files.is_empty() {
+                                format!(
+                                    "Refreshed {} review. No code changes found.",
+                                    app.review_scope_label()
+                                )
+                            } else {
+                                format!(
+                                    "Refreshed {} review. {} changed file(s) ready.",
+                                    app.review_scope_label(),
+                                    app.review.files.len()
+                                )
+                            };
+                            continue;
+                        }
+
+                        if key.code == KeyCode::Char('n') {
+                            app.session_snapshot = None;
+                            refresh_review_files(&mut app).await?;
+                            app.status = "Started a new workspace review session.".to_string();
                             continue;
                         }
 
                         if key.code == KeyCode::Enter && app.screen == Screen::Home {
                             if app.review.files.is_empty() {
-                                app.status =
-                                    "No reviewable changes yet. Start with Ctrl+O.".to_string();
+                                app.status = "No reviewable changes yet. Press o to open opencode."
+                                    .to_string();
                             } else {
                                 app.screen = Screen::Review;
                                 app.status = "Review workspace ready.".to_string();
@@ -724,11 +616,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
 fn draw(
     frame: &mut ratatui::Frame,
     app: &App,
-    composer: &TextArea<'_>,
     commit_message: &TextArea<'_>,
-    model_search: &TextArea<'_>,
-    matcher: &SkimMatcherV2,
-    model_cursor: usize,
 ) {
     let size = frame.area();
     let header_height = if app.screen == Screen::Review { 1 } else { 2 };
@@ -744,10 +632,6 @@ fn draw(
     }
 
     match app.overlay {
-        Overlay::Composer => draw_composer(frame, layout[1], app, composer),
-        Overlay::ModelPicker => {
-            draw_model_picker(frame, layout[1], app, model_search, matcher, model_cursor)
-        }
         Overlay::CommitPrompt => draw_commit_prompt(frame, layout[1], app, commit_message),
         Overlay::None => {}
     }
@@ -822,8 +706,8 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             styles::title(),
         ),
         Span::raw("  |  "),
-        Span::styled("model ", styles::subtle()),
-        Span::styled(app.current_model_label(), styles::title()),
+        Span::styled("scope ", styles::subtle()),
+        Span::styled(app.review_scope_label(), styles::title()),
     ]);
     frame.render_widget(Paragraph::new(summary).alignment(Alignment::Center), sections[2]);
 
@@ -843,14 +727,20 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(queue).alignment(Alignment::Center), sections[3]);
 
     let action_line = Line::from(vec![
-        Span::styled("Ctrl+O", styles::keybind()),
-        Span::styled(" compose", styles::muted()),
+            Span::styled("o", styles::keybind()),
+            Span::styled(" opencode", styles::muted()),
         Span::raw("      "),
         Span::styled("Enter", styles::keybind()),
         Span::styled(" review", styles::muted()),
         Span::raw("      "),
+        Span::styled("r", styles::keybind()),
+        Span::styled(" refresh", styles::muted()),
+        Span::raw("      "),
         Span::styled("c", styles::keybind()),
         Span::styled(" commit", styles::muted()),
+        Span::raw("      "),
+        Span::styled("n", styles::keybind()),
+        Span::styled(" new session", styles::muted()),
         Span::raw("      "),
         Span::styled("Ctrl+C", styles::keybind()),
         Span::styled(" quit", styles::muted()),
@@ -876,11 +766,11 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Line::from(Span::styled("No code changes yet", styles::title())),
             Line::from(Span::raw("")),
             Line::from(Span::styled(
-                "Open the composer and run a prompt to start a review session.",
+                "Press o to hand off to opencode, then come back here to review.",
                 styles::muted(),
             )),
             Line::from(Span::styled(
-                "Accepted and rejected changes will appear here as soon as the run finishes.",
+                "Use r to refresh current changes or n to start a new review session.",
                 styles::muted(),
             )),
         ])
@@ -971,6 +861,15 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             },
             styles::soft_accent(),
         ),
+        Span::raw("  |  "),
+        Span::styled(app.review_scope_label(), styles::muted()),
+        Span::raw(" review"),
+        Span::raw("  |  "),
+        Span::styled("o", styles::keybind()),
+        Span::styled(" opencode", styles::muted()),
+        Span::raw("  "),
+        Span::styled("r", styles::keybind()),
+        Span::styled(" refresh", styles::muted()),
     ])];
     let mut line_hunks = vec![None];
 
@@ -1075,58 +974,6 @@ fn diff_scroll_offset(app: &App, area: Rect, diff_lines: &[Line<'_>]) -> u16 {
     preferred_top.min(max_scroll).min(u16::MAX as usize) as u16
 }
 
-fn draw_composer(frame: &mut ratatui::Frame, area: Rect, app: &App, composer: &TextArea<'_>) {
-    let modal = centered_rect(60, 35, area);
-    frame.render_widget(Clear, modal);
-    let inner = modal.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    let lines = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(5),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    let block = Block::default()
-        .title("New Prompt")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(styles::BORDER_MUTED))
-        .style(Style::default().bg(styles::SURFACE_RAISED));
-    frame.render_widget(block, modal);
-    frame.render_widget(
-        Paragraph::new(app.current_model_label()).style(styles::title()),
-        lines[0],
-    );
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(vec![
-            Span::styled("Tab", styles::keybind()),
-            Span::raw(" models   "),
-            Span::styled("Ctrl+T", styles::keybind()),
-            Span::raw(" variant   "),
-            Span::styled("Esc", styles::keybind()),
-            Span::raw(" close"),
-        ])])
-        .style(styles::muted()),
-        lines[1],
-    );
-    frame.render_widget(composer, lines[2]);
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(vec![
-            Span::styled("Enter", styles::keybind()),
-            Span::raw(" run   "),
-            Span::styled("Up/Down", styles::keybind()),
-            Span::raw(" move"),
-        ])])
-        .style(styles::muted()),
-        lines[3],
-    );
-}
-
 fn draw_commit_prompt(
     frame: &mut ratatui::Frame,
     area: Rect,
@@ -1180,152 +1027,6 @@ fn draw_commit_prompt(
         Paragraph::new("Only accepted staged changes are committed.").style(styles::muted()),
         lines[3],
     );
-}
-
-fn draw_model_picker(
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    app: &App,
-    search: &TextArea<'_>,
-    matcher: &SkimMatcherV2,
-    model_cursor: usize,
-) {
-    let modal = centered_rect(70, 65, area);
-    frame.render_widget(Clear, modal);
-    let block = Block::default()
-        .title("Choose Model")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(styles::BORDER_MUTED))
-        .style(Style::default().bg(styles::SURFACE_RAISED));
-    frame.render_widget(block, modal);
-
-    let inner = modal.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    frame.render_widget(search, sections[0]);
-
-    let models = filtered_models(&app.models, matcher, &search.lines().join("\n"));
-    let mut rows = Vec::new();
-    let mut selected_row = None;
-    let mut last_provider = String::new();
-    for (index, model) in models.iter().enumerate() {
-        if model.provider != last_provider {
-            if !last_provider.is_empty() {
-                rows.push(ListItem::new(Line::from(Span::raw(""))));
-            }
-            rows.push(ListItem::new(Line::from(Span::styled(
-                model.provider.to_uppercase(),
-                styles::subtle(),
-            ))));
-            last_provider = model.provider.clone();
-        }
-        let row_index = rows.len();
-        if index == model_cursor {
-            selected_row = Some(row_index);
-        }
-        let style = if index == model_cursor {
-            Style::default()
-                .fg(styles::TEXT_PRIMARY)
-                .bg(styles::ACCENT_DIM)
-        } else {
-            Style::default().fg(styles::TEXT_MUTED)
-        };
-        let mut spans = vec![Span::styled(
-            sanitize_model_display(&model.name),
-            style.add_modifier(Modifier::BOLD),
-        )];
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(model.id.clone(), styles::subtle()));
-        let display_variants = model
-            .variants
-            .iter()
-            .map(|variant| sanitize_variant_display(variant))
-            .filter(|variant| !variant.is_empty())
-            .collect::<Vec<_>>();
-        if !display_variants.is_empty() {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(display_variants.join(", "), styles::subtle()));
-        }
-        if Some(&model.id) == app.selected_model.as_ref() {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                "selected",
-                Style::default()
-                    .fg(styles::BASE_BG)
-                    .bg(styles::SUCCESS)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        rows.push(ListItem::new(Line::from(spans)));
-    }
-
-    let mut model_list_state = ListState::default().with_selected(selected_row);
-    frame.render_stateful_widget(List::new(rows), sections[1], &mut model_list_state);
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(vec![
-            Span::styled("Enter", styles::keybind()),
-            Span::raw(" select   "),
-            Span::styled("Esc", styles::keybind()),
-            Span::raw(" back"),
-        ])])
-        .style(styles::muted()),
-        sections[2],
-    );
-}
-
-fn filtered_models<'a>(
-    models: &'a [ModelOption],
-    matcher: &SkimMatcherV2,
-    query: &str,
-) -> Vec<&'a ModelOption> {
-    let trimmed = query.trim();
-    if trimmed.is_empty() {
-        return models.iter().collect();
-    }
-
-    let mut scored = models
-        .iter()
-        .filter_map(|model| {
-            matcher
-                .fuzzy_match(
-                    &format!("{} {} {}", model.provider, model.name, model.id),
-                    trimmed,
-                )
-                .map(|score| (score, model))
-        })
-        .collect::<Vec<_>>();
-    scored.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then(a.1.provider.cmp(&b.1.provider))
-            .then(a.1.name.cmp(&b.1.name))
-    });
-    scored.into_iter().map(|(_, model)| model).collect()
-}
-
-fn sanitize_model_display(value: &str) -> String {
-    value
-        .replace("-thinking", "")
-        .replace(" thinking", "")
-        .trim()
-        .to_string()
-}
-
-fn sanitize_variant_display(value: &str) -> String {
-    if value.eq_ignore_ascii_case("thinking") {
-        String::new()
-    } else {
-        sanitize_model_display(value)
-    }
 }
 
 fn review_render_line_count(file: &FileDiff) -> usize {
@@ -1410,22 +1111,6 @@ fn review_marker(
             crate::domain::diff::FileStatus::Modified => "[ ]",
         },
     }
-}
-
-fn cycle_variant(app: &mut App, direction: isize) {
-    let variants = app.selected_model_variants();
-    if variants.is_empty() {
-        app.selected_variant = None;
-        return;
-    }
-
-    let current_index = app
-        .selected_variant
-        .as_ref()
-        .and_then(|variant| variants.iter().position(|candidate| candidate == variant))
-        .unwrap_or(0) as isize;
-    let next_index = (current_index + direction).rem_euclid(variants.len() as isize) as usize;
-    app.selected_variant = variants.get(next_index).cloned();
 }
 
 fn render_brand_lockup(
