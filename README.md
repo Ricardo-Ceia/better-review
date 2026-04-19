@@ -60,22 +60,42 @@ Coding agents accelerate implementation, but they also make it easy to skip inte
 
 ## Installation
 
+`install.sh` downloads prebuilt release binaries. If you get a 404, that means no GitHub release exists yet.
+
 ### One-command install (no Rust required)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Ricardo-Ceia/better-review/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/SalzDevs/better-review/main/install.sh | sh
 ```
 
 ### Install a specific release
 
 ```bash
-BETTER_REVIEW_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/Ricardo-Ceia/better-review/main/install.sh | sh
+BETTER_REVIEW_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/SalzDevs/better-review/main/install.sh | sh
 ```
+
+### If install returns 404
+
+Publish a release tag first (this triggers the release workflow and uploads binaries):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Then rerun the installer command.
+
+If an older tag run is stuck waiting for `macos-13`, use the latest workflow from `main` instead:
+
+1. Push the workflow update to `main`
+2. Open GitHub Actions -> `Release`
+3. Click `Run workflow` (uses `workflow_dispatch`)
+4. After that release is published, rerun install
 
 ### Custom install location
 
 ```bash
-BETTER_REVIEW_BIN_DIR="$HOME/.local/bin" curl -fsSL https://raw.githubusercontent.com/Ricardo-Ceia/better-review/main/install.sh | sh
+BETTER_REVIEW_BIN_DIR="$HOME/.local/bin" curl -fsSL https://raw.githubusercontent.com/SalzDevs/better-review/main/install.sh | sh
 ```
 
 Environment variables:
@@ -163,7 +183,7 @@ cargo test -- --nocapture
 ### Release process
 
 - Push a version tag like `v0.1.0` to trigger `.github/workflows/release.yml`
-- The workflow builds Linux + macOS binaries, packages `tar.gz` archives, and uploads `.sha256` checksums
+- The workflow builds Linux + macOS binaries (both Apple Silicon and Intel from one `macos-14` job), packages `tar.gz` archives, and uploads `.sha256` checksums
 - `install.sh` downloads those release artifacts (`latest` by default)
 
 ```bash

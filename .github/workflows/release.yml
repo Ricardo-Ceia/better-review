@@ -4,24 +4,27 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-13
-            target: x86_64-apple-darwin
+          - name: linux-x86_64
+            os: ubuntu-latest
+            rust_targets: x86_64-unknown-linux-gnu
+            build_targets: x86_64-unknown-linux-gnu
           - os: macos-14
-            target: aarch64-apple-darwin
+            name: macos-universal
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            build_targets: aarch64-apple-darwin x86_64-apple-darwin
 
     steps:
       - name: Checkout
@@ -30,36 +33,37 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust_targets }}
 
-      - name: Build release binary
-        run: cargo build --release --locked --target "${{ matrix.target }}"
-
-      - name: Package artifact
+      - name: Build and package artifacts
         shell: bash
         run: |
           set -euo pipefail
           bin="better-review"
-          target="${{ matrix.target }}"
-          archive="${bin}-${target}.tar.gz"
+          targets='${{ matrix.build_targets }}'
+          mkdir -p dist
 
-          cp "target/${target}/release/${bin}" "${bin}"
-          chmod +x "${bin}"
-          tar -czf "${archive}" "${bin}"
+          for target in ${targets}; do
+            archive="${bin}-${target}.tar.gz"
+            cargo build --release --locked --target "${target}"
 
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${archive}" > "${archive}.sha256"
-          else
-            shasum -a 256 "${archive}" > "${archive}.sha256"
-          fi
+            cp "target/${target}/release/${bin}" "${bin}"
+            chmod +x "${bin}"
+            tar -czf "dist/${archive}" "${bin}"
+            rm -f "${bin}"
+
+            if command -v sha256sum >/dev/null 2>&1; then
+              (cd dist && sha256sum "${archive}" > "${archive}.sha256")
+            else
+              (cd dist && shasum -a 256 "${archive}" > "${archive}.sha256")
+            fi
+          done
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.target }}
-          path: |
-            better-review-${{ matrix.target }}.tar.gz
-            better-review-${{ matrix.target }}.tar.gz.sha256
+          name: dist-${{ matrix.name }}
+          path: dist/*
 
   publish:
     name: Publish Release

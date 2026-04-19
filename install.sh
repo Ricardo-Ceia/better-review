@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO="${BETTER_REVIEW_REPO:-Ricardo-Ceia/better-review}"
+REPO="${BETTER_REVIEW_REPO:-SalzDevs/better-review}"
 VERSION="${BETTER_REVIEW_VERSION:-latest}"
 PREFIX="${BETTER_REVIEW_INSTALL_PREFIX:-}"
 BIN_DIR="${BETTER_REVIEW_BIN_DIR:-}"
@@ -91,7 +91,12 @@ ARCHIVE_PATH="${TMPDIR}/${ARCHIVE}"
 CHECKSUM_PATH="${ARCHIVE_PATH}.sha256"
 
 say "Downloading ${ARCHIVE_URL}"
-curl -fsSL "${ARCHIVE_URL}" -o "${ARCHIVE_PATH}" || fail "download failed"
+if ! curl -fsSL "${ARCHIVE_URL}" -o "${ARCHIVE_PATH}"; then
+  if [ "${SELECTED_VERSION}" = "latest" ]; then
+    fail "download failed (no release found for ${REPO}; create and push a tag like v0.1.0 first)"
+  fi
+  fail "download failed (release ${SELECTED_VERSION} not found for ${REPO})"
+fi
 
 if curl -fsSL "${CHECKSUM_URL}" -o "${CHECKSUM_PATH}"; then
   if command -v sha256sum >/dev/null 2>&1; then
