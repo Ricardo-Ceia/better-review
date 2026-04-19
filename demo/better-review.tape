@@ -16,21 +16,70 @@ Set Margin 16
 Set MarginFill "#11111b"
 Set BorderRadius 8
 Set CursorBlink false
-Set TypingSpeed 5ms
+Set TypingSpeed 8ms
 Set PlaybackSpeed 0.92
 Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
 
 Hide
-Type "./demo/run-demo.sh"
+Type "tmpdir=$(mktemp -d); cp -R demo/fixture/. $tmpdir; git -C $tmpdir init -q; git -C $tmpdir config user.name demo; git -C $tmpdir config user.email demo@example.com; git -C $tmpdir add .; git -C $tmpdir commit -qm init"
 Enter
-Wait+Screen /better-review demo repo/
+Type "cat > $tmpdir/src/lib.rs <<'EOF'"
+Enter
+Type "pub fn greeting(name: &str) -> String {"
+Enter
+Type "    format!(\"Hello, {name}. Review before you commit.\")"
+Enter
+Type "}"
+Enter
+Type ""
+Enter
+Type "pub fn headline() -> String {"
+Enter
+Type "    \"Review queue ready.\".to_string()"
+Enter
+Type "}"
+Enter
+Type ""
+Enter
+Type "pub fn summary(items: &[&str]) -> String {"
+Enter
+Type "    items.join(\", \")"
+Enter
+Type "}"
+Enter
+Type ""
+Enter
+Type "pub fn footer() -> &'static str {"
+Enter
+Type "    \"Accepted changes only.\""
+Enter
+Type "}"
+Enter
+Type "EOF"
+Enter
+Type "cat > $tmpdir/src/review_queue.rs <<'EOF'"
+Enter
+Type "pub fn pending_summary(total: usize, accepted: usize) -> String {"
+Enter
+Type "    let remaining = total.saturating_sub(accepted);"
+Enter
+Type "    format!(\"{remaining} change(s) still need review\")"
+Enter
+Type "}"
+Enter
+Type "EOF"
+Enter
+Type "cd $tmpdir && cargo run --manifest-path /home/ricardo/better-review/Cargo.toml"
+Enter
+Wait+Screen /No code changes yet/
 Show
 
 Sleep 1000ms
-Type "o"
-Wait+Screen /demo\/mock-opencode/
-Sleep 5200ms
+Type "r"
+Wait+Screen /Refreshed workspace review\. 2 changed file\(s\) ready\./
+Sleep 900ms
+Enter
 Wait+Screen /reviewing files/
 
 Sleep 900ms

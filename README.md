@@ -19,8 +19,8 @@ Run your coding agent, inspect the resulting diff in a focused fullscreen TUI, a
 The project includes a reproducible end-to-end demo that shows the intended workflow:
 
 1. Launch `better-review`
-2. Hand off to `opencode` and make changes in the repo
-3. Return to `better-review` and inspect generated changes in file/hunk mode
+2. Make changes in the repo with your agent or editor
+3. Refresh `better-review` and inspect generated changes in file/hunk mode
 4. Accept some changes, reject others
 5. Commit accepted changes only
 
@@ -38,8 +38,6 @@ vhs demo/better-review.tape
 Demo sources used to generate the recording:
 
 - Tape: `demo/better-review.tape`
-- Runner: `demo/run-demo.sh`
-- Mock agent CLI: `demo/mock-opencode.sh`
 - Fixture repo: `demo/fixture/`
 
 ## Why better-review
@@ -50,13 +48,13 @@ Coding agents accelerate implementation, but they also make it easy to skip inte
 
 ## Features
 
-- **Review-first flow**: hand off to `opencode` -> return to review -> commit accepted changes
-- **Session-scoped diffing**: isolate only changes produced during the current session
+- **Review-first flow**: run your agent however you like -> refresh review -> commit accepted changes
+- **Workspace diffing**: inspect current repository changes in one focused surface
 - **File + hunk decisions**: accept/reject at the granularity you need
 - **Accepted-only commit path**: commit exactly what you approved
 - **Workspace protection**: preserve unrelated dirty/staged work from before the run
 - **Non-destructive reject semantics**: reject controls commit eligibility rather than nuking your worktree
-- **Interactive opencode handoff**: suspend the TUI, use `opencode`, then return directly to review
+- **Pure review workflow**: run `opencode` however you like, then use `better-review` to inspect and gate the result
 - **Fullscreen terminal UX**: home screen, review panes, and commit modal
 - **Terminal safety guardrails**: alternate screen and scrollback purge during app lifecycle
 
@@ -105,10 +103,8 @@ cargo run
 
 | Key | Action |
 | --- | --- |
-| `o` | Open `opencode` |
 | `Enter` | Enter review or drill into hunks |
-| `r` | Refresh current review scope |
-| `n` | Start a new workspace review session |
+| `r` | Refresh current workspace changes |
 | `Esc` | Close modal, go back from hunks, or return home |
 | `Tab` | Cycle hunks |
 | `y` | Accept file or hunk |
@@ -121,7 +117,6 @@ cargo run
 
 - `src/app.rs`: TUI shell, event loop, screens, overlays, rendering
 - `src/services/git.rs`: snapshotting, diff collection, hunk sync, commit safety
-- `src/services/opencode.rs`: interactive opencode handoff launcher
 - `src/services/parser.rs`: diff parsing logic
 - `src/domain/`: session/diff domain structures
 - `src/ui/styles.rs`: shared styling and palette

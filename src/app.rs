@@ -20,9 +20,7 @@ use ratatui_textarea::{TextArea, WrapMode};
 use tokio::sync::mpsc;
 
 use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
-use crate::domain::session::WorkspaceSnapshot;
 use crate::services::git::GitService;
-use crate::services::opencode::OpencodeService;
 use crate::ui::styles;
 
 pub async fn run() -> Result<()> {
@@ -50,12 +48,11 @@ pub async fn run() -> Result<()> {
 struct App {
     repo_path: PathBuf,
     git: GitService,
-    opencode: OpencodeService,
     status: String,
     screen: Screen,
     review: ReviewUiState,
     overlay: Overlay,
-    session_snapshot: Option<WorkspaceSnapshot>,
+    had_staged_changes_on_open: bool,
     review_busy: bool,
     logo_animation: AnimatedTextState,
     tx: mpsc::UnboundedSender<Message>,
@@ -104,17 +101,15 @@ impl App {
     async fn new() -> Result<Self> {
         let repo_path = std::env::current_dir()?;
         let git = GitService::new(&repo_path);
-        let opencode = OpencodeService::new(&repo_path, "opencode");
         let (tx, rx) = mpsc::unbounded_channel();
         let mut app = Self {
             repo_path,
             git,
-            opencode,
-            status: "Press o to open opencode.".to_string(),
+            status: "Run opencode elsewhere, then press r to refresh.".to_string(),
             screen: Screen::Home,
             review: ReviewUiState::default(),
             overlay: Overlay::None,
-            session_snapshot: None,
+            had_staged_changes_on_open: false,
             review_busy: false,
             logo_animation: AnimatedTextState::with_interval(120),
             tx,
@@ -127,29 +122,9 @@ impl App {
     async fn load_initial_state(&mut self) -> Result<()> {
         let (_, files) = self.git.collect_diff().await?;
         self.review.files = files;
+        self.had_staged_changes_on_open = self.git.has_staged_changes().await?;
 
         Ok(())
-    }
-
-    fn current_file_path(&self) -> Option<&str> {
-        self.review.files.get(self.review.cursor_file).map(FileDiff::display_path)
-    }
-
-    fn current_file_has_protected_unstaged_content(&self) -> bool {
-        let Some(path) = self.current_file_path() else {
-            return false;
-        };
-        self.session_snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.has_unstaged_path(path))
-    }
-
-    fn review_scope_label(&self) -> &'static str {
-        if self.session_snapshot.is_some() {
-            "session"
-        } else {
-            "workspace"
-        }
     }
 
     fn review_counts(&self) -> ReviewCounts {
@@ -227,13 +202,10 @@ async fn submit_commit_message(app: &mut App, commit_message: &mut TextArea<'sta
         return Ok(());
     }
 
-    if app
-        .session_snapshot
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.had_staged_changes)
-    {
-        app.status = "Cannot commit from better-review because the session started with unrelated staged changes."
-            .to_string();
+    if app.had_staged_changes_on_open {
+        app.status =
+            "Cannot commit from better-review because the app opened with unrelated staged changes."
+                .to_string();
         return Ok(());
     }
 
@@ -246,70 +218,8 @@ async fn submit_commit_message(app: &mut App, commit_message: &mut TextArea<'sta
     Ok(())
 }
 
-async fn open_opencode_handoff(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    app: &mut App,
-) -> Result<()> {
-    if app.review_busy {
-        app.status = "Wait for the current review update to finish.".to_string();
-        return Ok(());
-    }
-
-    if app.session_snapshot.is_none() {
-        app.session_snapshot = Some(app.git.snapshot_workspace().await?);
-    }
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    let handoff_result = app.opencode.launch_interactive().await;
-
-    enable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        TerminalClear(ClearType::All),
-        TerminalClear(ClearType::Purge)
-    )?;
-    terminal.hide_cursor()?;
-
-    match handoff_result {
-        Ok(status) => {
-            refresh_review_files(app).await?;
-            app.status = if app.review.files.is_empty() {
-                if status.success() {
-                    "Returned from opencode. No reviewable changes yet.".to_string()
-                } else {
-                    "Opencode exited without new reviewable changes.".to_string()
-                }
-            } else if status.success() {
-                format!(
-                    "Returned from opencode. Review {} changed file(s).",
-                    app.review.files.len()
-                )
-            } else {
-                format!(
-                    "Opencode exited. Review {} changed file(s).",
-                    app.review.files.len()
-                )
-            };
-        }
-        Err(err) => {
-            app.status = format!("Could not open opencode: {err}");
-        }
-    }
-
-    Ok(())
-}
-
 async fn refresh_review_files(app: &mut App) -> Result<()> {
-    let (_, files) = if let Some(snapshot) = app.session_snapshot.as_ref() {
-        app.git.collect_session_diff(snapshot).await?
-    } else {
-        app.git.collect_diff().await?
-    };
+    let (_, files) = app.git.collect_diff().await?;
     app.review.files = files;
     app.review.cursor_file = 0;
     app.review.cursor_hunk = 0;
@@ -386,38 +296,23 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         }
                     },
                     Overlay::None => {
-                        if key.code == KeyCode::Char('o') {
-                            open_opencode_handoff(terminal, &mut app).await?;
-                            continue;
-                        }
-
-                        if key.code == KeyCode::Char('r') {
+                        if matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')) {
                             refresh_review_files(&mut app).await?;
                             app.status = if app.review.files.is_empty() {
-                                format!(
-                                    "Refreshed {} review. No code changes found.",
-                                    app.review_scope_label()
-                                )
+                                "Refreshed workspace review. No code changes found.".to_string()
                             } else {
                                 format!(
-                                    "Refreshed {} review. {} changed file(s) ready.",
-                                    app.review_scope_label(),
+                                    "Refreshed workspace review. {} changed file(s) ready.",
                                     app.review.files.len()
                                 )
                             };
                             continue;
                         }
 
-                        if key.code == KeyCode::Char('n') {
-                            app.session_snapshot = None;
-                            refresh_review_files(&mut app).await?;
-                            app.status = "Started a new workspace review session.".to_string();
-                            continue;
-                        }
-
                         if key.code == KeyCode::Enter && app.screen == Screen::Home {
                             if app.review.files.is_empty() {
-                                app.status = "No reviewable changes yet. Press o to open opencode."
+                                app.status =
+                                    "No reviewable changes yet. Run opencode elsewhere, then press r."
                                     .to_string();
                             } else {
                                 app.screen = Screen::Review;
@@ -507,12 +402,6 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Char('y') => {
             if app.review.focus == ReviewFocus::Files {
-                if app.current_file_has_protected_unstaged_content() {
-                    app.status =
-                        "Cannot accept a file with pre-run unstaged changes. Review hunks or use your editor."
-                            .to_string();
-                    return Ok(());
-                }
                 if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
                     match app.git.accept_file(file).await {
                         Ok(()) => app.status = "Accepted file changes.".to_string(),
@@ -529,13 +418,12 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
                     let tx = app.tx.clone();
                     let git = app.git.clone();
-                    let snapshot = app.session_snapshot.clone();
                     app.review_busy = true;
                     app.status = "Applying accepted hunk...".to_string();
 
                     tokio::spawn(async move {
                         let result = git
-                            .sync_file_hunks_to_index(&updated_file, snapshot.as_ref())
+                            .sync_file_hunks_to_index(&updated_file)
                             .await
                             .map_err(|err| format!("Could not accept hunk: {err}"));
                         let _ = tx.send(Message::HunkSyncFinished {
@@ -552,11 +440,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('x') => {
             if app.review.focus == ReviewFocus::Files {
                 if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                    let result = if let Some(snapshot) = app.session_snapshot.as_ref() {
-                        app.git.reject_file(file, snapshot).await
-                    } else {
-                        app.git.reject_file_in_place(file).await
-                    };
+                    let result = app.git.reject_file_in_place(file).await;
 
                     match result {
                         Ok(()) => app.status = "Rejected file changes.".to_string(),
@@ -573,13 +457,12 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
                     let tx = app.tx.clone();
                     let git = app.git.clone();
-                    let snapshot = app.session_snapshot.clone();
                     app.review_busy = true;
                     app.status = "Rejecting hunk...".to_string();
 
                     tokio::spawn(async move {
                         let result = git
-                            .sync_file_hunks_to_index(&updated_file, snapshot.as_ref())
+                            .sync_file_hunks_to_index(&updated_file)
                             .await
                             .map_err(|err| format!("Could not reject hunk: {err}"));
                         let _ = tx.send(Message::HunkSyncFinished {
@@ -595,11 +478,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
         }
         KeyCode::Char('u') => {
             if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                let result = if let Some(snapshot) = app.session_snapshot.as_ref() {
-                    app.git.unstage_file(file, snapshot).await
-                } else {
-                    app.git.unstage_file_in_place(file).await
-                };
+                let result = app.git.unstage_file_in_place(file).await;
 
                 match result {
                     Ok(()) => app.status = "Moved file back to unreviewed.".to_string(),
@@ -706,8 +585,8 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             styles::title(),
         ),
         Span::raw("  |  "),
-        Span::styled("scope ", styles::subtle()),
-        Span::styled(app.review_scope_label(), styles::title()),
+        Span::styled("mode ", styles::subtle()),
+        Span::styled("review", styles::title()),
     ]);
     frame.render_widget(Paragraph::new(summary).alignment(Alignment::Center), sections[2]);
 
@@ -727,9 +606,6 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(queue).alignment(Alignment::Center), sections[3]);
 
     let action_line = Line::from(vec![
-            Span::styled("o", styles::keybind()),
-            Span::styled(" opencode", styles::muted()),
-        Span::raw("      "),
         Span::styled("Enter", styles::keybind()),
         Span::styled(" review", styles::muted()),
         Span::raw("      "),
@@ -738,9 +614,6 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Span::raw("      "),
         Span::styled("c", styles::keybind()),
         Span::styled(" commit", styles::muted()),
-        Span::raw("      "),
-        Span::styled("n", styles::keybind()),
-        Span::styled(" new session", styles::muted()),
         Span::raw("      "),
         Span::styled("Ctrl+C", styles::keybind()),
         Span::styled(" quit", styles::muted()),
@@ -766,11 +639,11 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Line::from(Span::styled("No code changes yet", styles::title())),
             Line::from(Span::raw("")),
             Line::from(Span::styled(
-                "Press o to hand off to opencode, then come back here to review.",
+                "Run opencode in another pane or window, then come back here to review.",
                 styles::muted(),
             )),
             Line::from(Span::styled(
-                "Use r to refresh current changes or n to start a new review session.",
+                "Use r to refresh current changes after the repo changes.",
                 styles::muted(),
             )),
         ])
@@ -862,12 +735,6 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             styles::soft_accent(),
         ),
         Span::raw("  |  "),
-        Span::styled(app.review_scope_label(), styles::muted()),
-        Span::raw(" review"),
-        Span::raw("  |  "),
-        Span::styled("o", styles::keybind()),
-        Span::styled(" opencode", styles::muted()),
-        Span::raw("  "),
         Span::styled("r", styles::keybind()),
         Span::styled(" refresh", styles::muted()),
     ])];
