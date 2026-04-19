@@ -76,9 +76,6 @@ Wait+Screen /No code changes yet/
 Show
 
 Sleep 1000ms
-Type "r"
-Wait+Screen /Refreshed workspace review\. 2 changed file\(s\) ready\./
-Sleep 900ms
 Enter
 Wait+Screen /reviewing files/
 

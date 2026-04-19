@@ -105,7 +105,7 @@ impl App {
         let mut app = Self {
             repo_path,
             git,
-            status: "Run opencode elsewhere, then press r to refresh.".to_string(),
+            status: "Run opencode elsewhere, then open better-review to review changes.".to_string(),
             screen: Screen::Home,
             review: ReviewUiState::default(),
             overlay: Overlay::None,
@@ -296,23 +296,10 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         }
                     },
                     Overlay::None => {
-                        if matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')) {
-                            refresh_review_files(&mut app).await?;
-                            app.status = if app.review.files.is_empty() {
-                                "Refreshed workspace review. No code changes found.".to_string()
-                            } else {
-                                format!(
-                                    "Refreshed workspace review. {} changed file(s) ready.",
-                                    app.review.files.len()
-                                )
-                            };
-                            continue;
-                        }
-
                         if key.code == KeyCode::Enter && app.screen == Screen::Home {
                             if app.review.files.is_empty() {
                                 app.status =
-                                    "No reviewable changes yet. Run opencode elsewhere, then press r."
+                                    "No reviewable changes yet. Run opencode, then reopen better-review."
                                     .to_string();
                             } else {
                                 app.screen = Screen::Review;
@@ -609,9 +596,6 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Span::styled("Enter", styles::keybind()),
         Span::styled(" review", styles::muted()),
         Span::raw("      "),
-        Span::styled("r", styles::keybind()),
-        Span::styled(" refresh", styles::muted()),
-        Span::raw("      "),
         Span::styled("c", styles::keybind()),
         Span::styled(" commit", styles::muted()),
         Span::raw("      "),
@@ -643,7 +627,7 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 styles::muted(),
             )),
             Line::from(Span::styled(
-                "Use r to refresh current changes after the repo changes.",
+                "Relaunch better-review after opencode finishes to load new changes.",
                 styles::muted(),
             )),
         ])
@@ -734,9 +718,6 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             },
             styles::soft_accent(),
         ),
-        Span::raw("  |  "),
-        Span::styled("r", styles::keybind()),
-        Span::styled(" refresh", styles::muted()),
     ])];
     let mut line_hunks = vec![None];
 

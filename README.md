@@ -20,7 +20,7 @@ The project includes a reproducible end-to-end demo that shows the intended work
 
 1. Launch `better-review`
 2. Make changes in the repo with your agent or editor
-3. Refresh `better-review` and inspect generated changes in file/hunk mode
+3. Re-open `better-review` and inspect generated changes in file/hunk mode
 4. Accept some changes, reject others
 5. Commit accepted changes only
 
@@ -48,7 +48,7 @@ Coding agents accelerate implementation, but they also make it easy to skip inte
 
 ## Features
 
-- **Review-first flow**: run your agent however you like -> refresh review -> commit accepted changes
+- **Review-first flow**: run your agent however you like -> open review -> commit accepted changes
 - **Workspace diffing**: inspect current repository changes in one focused surface
 - **File + hunk decisions**: accept/reject at the granularity you need
 - **Accepted-only commit path**: commit exactly what you approved
@@ -104,7 +104,6 @@ cargo run
 | Key | Action |
 | --- | --- |
 | `Enter` | Enter review or drill into hunks |
-| `r` | Refresh current workspace changes |
 | `Esc` | Close modal, go back from hunks, or return home |
 | `Tab` | Cycle hunks |
 | `y` | Accept file or hunk |
@@ -116,9 +115,9 @@ cargo run
 ## Architecture
 
 - `src/app.rs`: TUI shell, event loop, screens, overlays, rendering
-- `src/services/git.rs`: snapshotting, diff collection, hunk sync, commit safety
+- `src/services/git.rs`: diff collection, hunk sync, commit safety
 - `src/services/parser.rs`: diff parsing logic
-- `src/domain/`: session/diff domain structures
+- `src/domain/`: diff domain structures
 - `src/ui/styles.rs`: shared styling and palette
 
 ## Development
