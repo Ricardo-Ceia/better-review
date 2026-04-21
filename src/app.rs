@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
@@ -79,6 +79,7 @@ enum Overlay {
     None,
     CommitPrompt,
     SessionPicker,
+    ModelPicker,
     WhyThis,
 }
 
@@ -105,17 +106,20 @@ enum ReviewFocus {
 }
 
 enum Message {
-    HunkSyncFinished {
+    HunkSync {
         file_index: usize,
         original_file: FileDiff,
         updated_file: FileDiff,
         success_status: String,
         result: Result<(), String>,
     },
-    WhyThisFinished {
+    WhyThis {
         cache_key: String,
         label: String,
         result: Result<WhyAnswer, String>,
+    },
+    ModelList {
+        result: Result<Vec<String>, String>,
     },
 }
 
@@ -131,6 +135,25 @@ struct WhyThisUiState {
     cache: HashMap<String, WhyAnswer>,
     panel: WhyThisPanel,
     selections: HashMap<String, WhySelection>,
+    model: WhyModelState,
+}
+
+#[derive(Default)]
+struct WhyModelState {
+    available: Vec<String>,
+    choice: WhyModelChoice,
+    cursor: usize,
+    auto_session_model: Option<String>,
+    loading: bool,
+    last_loaded_at: Option<Instant>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum WhyModelChoice {
+    #[default]
+    Auto,
+    Explicit(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +217,7 @@ impl App {
         self.review.files = files;
         self.had_staged_changes_on_open = self.git.has_staged_changes().await?;
         self.load_sessions()?;
+        self.refresh_auto_model();
 
         Ok(())
     }
@@ -241,6 +265,21 @@ impl App {
             .selected
             .and_then(|index| self.session_state.sessions.get(index))
     }
+
+    fn refresh_auto_model(&mut self) {
+        self.why_this.model.auto_session_model = None;
+        let session_id = self.active_session().map(|session| session.id.clone());
+        let Some(opencode) = &self.opencode else {
+            return;
+        };
+        let Some(session_id) = session_id else {
+            return;
+        };
+
+        if let Ok(model) = opencode.session_model(&session_id) {
+            self.why_this.model.auto_session_model = model;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -253,6 +292,7 @@ struct ReviewCounts {
 const BRAND_ICON: &str = "⌕";
 const BRAND_ICON_ALT: &str = "✓";
 const BRAND_WORDMARK: &str = "better-review";
+const MODEL_CACHE_TTL: Duration = Duration::from_secs(180);
 fn brand_lockup_width() -> u16 {
     BRAND_ICON.chars().count() as u16 + 2 + BRAND_WORDMARK.chars().count() as u16
 }
@@ -338,7 +378,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
 
         while let Ok(message) = app.rx.try_recv() {
             match message {
-                Message::HunkSyncFinished {
+                Message::HunkSync {
                     file_index,
                     original_file,
                     updated_file,
@@ -360,7 +400,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         }
                     }
                 }
-                Message::WhyThisFinished {
+                Message::WhyThis {
                     cache_key,
                     label,
                     result,
@@ -377,6 +417,36 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                             app.status = format!("Could not load why-this: {error}");
                             app.why_this.panel = WhyThisPanel::Failed { label, error };
                             app.overlay = Overlay::WhyThis;
+                        }
+                    }
+                }
+                Message::ModelList { result } => {
+                    app.why_this.model.loading = false;
+                    match result {
+                        Ok(mut models) => {
+                            if let WhyModelChoice::Explicit(explicit) = &app.why_this.model.choice
+                                && !models.contains(explicit)
+                            {
+                                models.insert(0, explicit.clone());
+                            }
+
+                            app.why_this.model.available = models;
+                            app.why_this.model.cursor = model_picker_cursor(
+                                &app.why_this.model.choice,
+                                &app.why_this.model.available,
+                            );
+                            app.why_this.model.last_loaded_at = Some(Instant::now());
+                            app.why_this.model.last_error = None;
+                            if app.overlay == Overlay::ModelPicker {
+                                app.status =
+                                    "Choose the model for Why This? (or keep Auto).".to_string();
+                            }
+                        }
+                        Err(error) => {
+                            app.why_this.model.last_error = Some(error.clone());
+                            if app.overlay == Overlay::ModelPicker {
+                                app.status = format!("Could not load Why This? models: {error}");
+                            }
                         }
                     }
                 }
@@ -406,6 +476,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                     }
                 },
                 Overlay::SessionPicker => handle_session_picker_key(&mut app, key),
+                Overlay::ModelPicker => handle_model_picker_key(&mut app, key),
                 Overlay::WhyThis => handle_why_this_overlay_key(&mut app, key),
                 Overlay::None => {
                     if key.code == KeyCode::Enter && app.screen == Screen::Home {
@@ -524,7 +595,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                         .sync_file_hunks_to_index(&updated_file)
                         .await
                         .map_err(|err| format!("Could not accept hunk: {err}"));
-                    let _ = tx.send(Message::HunkSyncFinished {
+                    let _ = tx.send(Message::HunkSync {
                         file_index,
                         original_file,
                         updated_file,
@@ -563,7 +634,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                         .sync_file_hunks_to_index(&updated_file)
                         .await
                         .map_err(|err| format!("Could not reject hunk: {err}"));
-                    let _ = tx.send(Message::HunkSyncFinished {
+                    let _ = tx.send(Message::HunkSync {
                         file_index,
                         original_file,
                         updated_file,
@@ -597,9 +668,11 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Char('w') => {
             request_why_this(app).await?;
         }
-        KeyCode::Char(' ') => {
+        KeyCode::Char('v') => {
             toggle_why_selection(app);
         }
+        KeyCode::Char('V') => clear_why_selection_for_current_file(app),
+        KeyCode::Char('m') => open_model_picker(app).await,
         _ => {}
     }
 
@@ -622,6 +695,7 @@ fn handle_session_picker_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Enter => {
             app.session_state.selected = Some(app.session_state.cursor);
+            app.refresh_auto_model();
             app.overlay = Overlay::None;
             if let Some(session) = app.active_session() {
                 app.status = format!("Why This? will use opencode session {}.", session.title);
@@ -636,6 +710,76 @@ fn handle_why_this_overlay_key(app: &mut App, key: KeyEvent) {
         app.overlay = Overlay::None;
         app.status = "Why This? pane closed.".to_string();
     }
+}
+
+fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
+    let max_index = app.why_this.model.available.len();
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = Overlay::None;
+            app.status = "Why This? model picker closed.".to_string();
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.why_this.model.cursor = app.why_this.model.cursor.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') if app.why_this.model.cursor < max_index => {
+            app.why_this.model.cursor += 1;
+        }
+        KeyCode::Enter => {
+            if app.why_this.model.cursor == 0 {
+                app.why_this.model.choice = WhyModelChoice::Auto;
+                app.status = format!("Why This? model set to {}.", why_model_display_label(app));
+            } else if let Some(model) = app
+                .why_this
+                .model
+                .available
+                .get(app.why_this.model.cursor - 1)
+                .cloned()
+            {
+                app.why_this.model.choice = WhyModelChoice::Explicit(model.clone());
+                app.status = format!("Why This? model set to {model}.");
+            }
+            app.overlay = Overlay::None;
+        }
+        _ => {}
+    }
+}
+
+async fn open_model_picker(app: &mut App) {
+    let Some(opencode) = app.opencode.clone() else {
+        app.status =
+            "Why This? model selection is unavailable because opencode is not initialized."
+                .to_string();
+        return;
+    };
+
+    app.overlay = Overlay::ModelPicker;
+    app.why_this.model.cursor =
+        model_picker_cursor(&app.why_this.model.choice, &app.why_this.model.available);
+
+    let is_cache_fresh = app
+        .why_this
+        .model
+        .last_loaded_at
+        .is_some_and(|loaded_at| loaded_at.elapsed() < MODEL_CACHE_TTL);
+    if is_cache_fresh && !app.why_this.model.available.is_empty() {
+        app.status = "Choose the model for Why This? (or keep Auto).".to_string();
+        return;
+    }
+
+    if app.why_this.model.loading {
+        app.status = "Loading Why This? models...".to_string();
+        return;
+    }
+
+    app.why_this.model.loading = true;
+    app.status = "Loading Why This? models...".to_string();
+
+    let tx = app.tx.clone();
+    tokio::spawn(async move {
+        let result = opencode.list_models().await.map_err(|err| err.to_string());
+        let _ = tx.send(Message::ModelList { result });
+    });
 }
 
 async fn request_why_this(app: &mut App) -> Result<()> {
@@ -655,7 +799,8 @@ async fn request_why_this(app: &mut App) -> Result<()> {
         return Ok(());
     };
 
-    let cache_key = target.cache_key(&session.id);
+    let resolved_model = resolved_why_model(app);
+    let cache_key = why_cache_key(&target, &session.id, resolved_model.as_deref());
     if let Some(answer) = app.why_this.cache.get(&cache_key).cloned() {
         app.overlay = Overlay::WhyThis;
         app.why_this.panel = WhyThisPanel::Ready { label, answer };
@@ -669,14 +814,15 @@ async fn request_why_this(app: &mut App) -> Result<()> {
     app.why_this.panel = WhyThisPanel::Loading {
         label: label.clone(),
     };
-    app.status = format!("Asking opencode why this exists for {label}...");
+    let model_display = why_model_display_label(app);
+    app.status = format!("Asking opencode why this exists for {label} using {model_display}...");
 
     tokio::spawn(async move {
         let result = opencode
-            .ask_why(&session.id, &target)
+            .ask_why(&session.id, &target, resolved_model.as_deref())
             .await
             .map_err(|err| err.to_string());
-        let _ = tx.send(Message::WhyThisFinished {
+        let _ = tx.send(Message::WhyThis {
             cache_key,
             label,
             result,
@@ -703,6 +849,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
     match app.overlay {
         Overlay::CommitPrompt => draw_commit_prompt(frame, layout[1], app, commit_message),
         Overlay::SessionPicker => draw_session_picker(frame, layout[1], app),
+        Overlay::ModelPicker => draw_model_picker(frame, layout[1], app),
         Overlay::WhyThis => draw_why_this(frame, layout[1], app),
         Overlay::None => {}
     }
@@ -1126,6 +1273,109 @@ fn draw_session_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     );
 }
 
+fn draw_model_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let modal = centered_rect(62, 48, area);
+    frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
+        modal,
+    );
+    let inner = modal.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(2)])
+        .split(inner);
+
+    let mut rows = Vec::with_capacity(app.why_this.model.available.len() + 1);
+    let auto_label = format!(" Auto ({})", auto_model_label(app));
+    rows.push(model_picker_item(
+        0,
+        &auto_label,
+        app,
+        app.why_this.model.choice == WhyModelChoice::Auto,
+    ));
+
+    for (index, model) in app.why_this.model.available.iter().enumerate() {
+        rows.push(model_picker_item(
+            index + 1,
+            model,
+            app,
+            matches!(&app.why_this.model.choice, WhyModelChoice::Explicit(selected) if selected == model),
+        ));
+    }
+
+    if app.why_this.model.loading && app.why_this.model.available.is_empty() {
+        rows.push(ListItem::new(Line::from(Span::styled(
+            " Loading models...",
+            styles::muted(),
+        ))));
+    }
+
+    if let Some(error) = &app.why_this.model.last_error {
+        rows.push(ListItem::new(Line::from(Span::styled(
+            format!(" Error: {error}"),
+            Style::default().fg(styles::DANGER),
+        ))));
+        rows.push(ListItem::new(Line::from(Span::styled(
+            " Press m again to retry.",
+            styles::muted(),
+        ))));
+    }
+
+    let mut state = ListState::default().with_selected(Some(app.why_this.model.cursor));
+    frame.render_stateful_widget(
+        List::new(rows).block(
+            Block::default()
+                .title(Line::from(Span::styled(
+                    "Choose Why This? model",
+                    styles::title(),
+                )))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
+                .style(Style::default().bg(styles::SURFACE_RAISED)),
+        ),
+        sections[0],
+        &mut state,
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Enter", styles::keybind()),
+            Span::styled(" select", styles::muted()),
+            Span::raw("  "),
+            Span::styled("Esc", styles::keybind()),
+            Span::styled(" close", styles::muted()),
+        ]))
+        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        sections[1],
+    );
+}
+
+fn model_picker_item(
+    index: usize,
+    label: &str,
+    app: &App,
+    selected_value: bool,
+) -> ListItem<'static> {
+    let style = if index == app.why_this.model.cursor {
+        Style::default()
+            .fg(styles::TEXT_PRIMARY)
+            .bg(styles::ACCENT_DIM)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(styles::TEXT_MUTED)
+    };
+    let marker = if selected_value { "[✓]" } else { "[ ]" };
+
+    ListItem::new(Line::from(vec![
+        Span::styled(format!(" {marker} "), style),
+        Span::styled(label.to_string(), style),
+    ]))
+}
+
 fn draw_why_this(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let modal = centered_rect(70, 52, area);
     frame.render_widget(Clear, modal);
@@ -1145,39 +1395,59 @@ fn draw_why_this(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn why_panel_lines(app: &App) -> Vec<Line<'static>> {
-    let session_line = app
-        .active_session()
-        .map(|session| format!("session: {} ({})", session.title, session.id))
-        .unwrap_or_else(|| "session: none selected".to_string());
+    let session_line = why_session_line(app);
 
     let mut lines = vec![Line::from(Span::styled(
         session_line,
         styles::soft_accent(),
     ))];
+    lines.push(Line::from(Span::styled(
+        format!("model: {}", why_model_display_label(app)),
+        styles::muted(),
+    )));
     if let Some(selection_summary) = current_selection_summary(app) {
         lines.push(Line::from(Span::styled(selection_summary, styles::muted())));
     }
     match &app.why_this.panel {
         WhyThisPanel::Empty => {
             lines.push(Line::from(Span::raw("")));
+            lines.push(Line::from(Span::styled("How to Use", styles::title())));
+            lines.push(Line::from(vec![
+                Span::styled(" w ", styles::keybind()),
+                Span::styled("ask why for focus or marks", styles::muted()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(" v ", styles::keybind()),
+                Span::styled("mark current hunk/line", styles::muted()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(" V ", styles::keybind()),
+                Span::styled("clear marks in current file", styles::muted()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(" m ", styles::keybind()),
+                Span::styled("choose model", styles::muted()),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(" s ", styles::keybind()),
+                Span::styled("choose attributed session", styles::muted()),
+            ]));
+            lines.push(Line::from(Span::raw("")));
             lines.push(Line::from(Span::styled(
-                "Press w to ask opencode why the selected file, hunk, or line exists.",
-                styles::muted(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "Press s to change the attributed opencode session.",
-                styles::muted(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "Press Space on hunk headers or diff lines to build a grouped Why This? selection for this file.",
-                styles::muted(),
+                "Tip: if marks exist, Why This explains them together; otherwise it explains current focus.",
+                styles::subtle(),
             )));
         }
         WhyThisPanel::Loading { label } => {
             lines.push(Line::from(Span::raw("")));
+            lines.push(Line::from(Span::styled(label.to_string(), styles::title())));
             lines.push(Line::from(Span::styled(
-                format!("Loading explanation for {label}..."),
-                styles::title(),
+                loading_thinking_label(&app.logo_animation),
+                styles::accent_bold(),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("Model: {}", why_model_display_label(app)),
+                styles::muted(),
             )));
             lines.push(Line::from(Span::styled(
                 "Using a fork of the selected session so the live coding thread stays clean.",
@@ -1192,10 +1462,7 @@ fn why_panel_lines(app: &App) -> Vec<Line<'static>> {
                 styles::subtle(),
             )));
             lines.push(Line::from(Span::raw("")));
-            for paragraph in answer.content.split("\n\n") {
-                lines.push(Line::from(Span::raw(paragraph.to_string())));
-                lines.push(Line::from(Span::raw("")));
-            }
+            lines.extend(render_why_answer_lines(&answer.content));
         }
         WhyThisPanel::Failed { label, error } => {
             lines.push(Line::from(Span::raw("")));
@@ -1356,7 +1623,9 @@ fn move_review_cursor_by_line(app: &mut App, delta: isize) {
 
 fn toggle_why_selection(app: &mut App) {
     if app.review.focus != ReviewFocus::Hunks {
-        app.status = "Open a file hunk or line first, then press Space to build a grouped Why This? selection.".to_string();
+        app.status =
+            "Open a file hunk or line first, then press v to build a grouped Why This? selection."
+                .to_string();
         return;
     }
 
@@ -1411,6 +1680,30 @@ fn toggle_why_selection(app: &mut App) {
     } else {
         format!("Selected {selected_count} line(s) in {path} for grouped Why This?.")
     };
+}
+
+fn clear_why_selection_for_current_file(app: &mut App) {
+    let Some(file) = app.review.files.get(app.review.cursor_file) else {
+        app.status = "No file is selected for Why This?.".to_string();
+        return;
+    };
+
+    if app
+        .why_this
+        .selections
+        .remove(file.display_path())
+        .is_some()
+    {
+        app.status = format!(
+            "Cleared Why This? grouped selection for {}.",
+            file.display_path()
+        );
+    } else {
+        app.status = format!(
+            "No Why This? grouped selection set for {}.",
+            file.display_path()
+        );
+    }
 }
 
 fn toggle_hunk_selection(
@@ -1477,6 +1770,97 @@ fn current_selection_summary(app: &App) -> Option<String> {
         }
         _ => return None,
     })
+}
+
+fn why_session_line(app: &App) -> String {
+    app.active_session()
+        .map(|session| format!("session: {} ({})", session.title, session.id))
+        .unwrap_or_else(|| "session: none selected".to_string())
+}
+
+fn model_picker_cursor(choice: &WhyModelChoice, models: &[String]) -> usize {
+    match choice {
+        WhyModelChoice::Auto => 0,
+        WhyModelChoice::Explicit(model) => {
+            models
+                .iter()
+                .position(|candidate| candidate == model)
+                .unwrap_or(0)
+                + 1
+        }
+    }
+}
+
+fn resolved_why_model(app: &App) -> Option<String> {
+    match &app.why_this.model.choice {
+        WhyModelChoice::Auto => app.why_this.model.auto_session_model.clone(),
+        WhyModelChoice::Explicit(model) => Some(model.clone()),
+    }
+}
+
+fn auto_model_label(app: &App) -> String {
+    app.why_this
+        .model
+        .auto_session_model
+        .clone()
+        .unwrap_or_else(|| "session default".to_string())
+}
+
+fn why_model_display_label(app: &App) -> String {
+    match &app.why_this.model.choice {
+        WhyModelChoice::Auto => format!("Auto ({})", auto_model_label(app)),
+        WhyModelChoice::Explicit(model) => model.clone(),
+    }
+}
+
+fn why_cache_key(target: &WhyTarget, session_id: &str, model: Option<&str>) -> String {
+    let base = target.cache_key(session_id);
+    match model {
+        Some(model) => format!("{base}:model:{model}"),
+        None => format!("{base}:model:auto"),
+    }
+}
+
+fn loading_thinking_label(animation: &AnimatedTextState) -> String {
+    let phase = (animation.frame / 24) % 4;
+    let dots = ".".repeat(phase as usize);
+    format!("Thinking{dots}")
+}
+
+fn render_why_answer_lines(content: &str) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for paragraph in content.split("\n\n") {
+        let trimmed = paragraph.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("Intent:") {
+            lines.push(Line::from(vec![
+                Span::styled("Intent:", styles::accent_bold()),
+                Span::raw(rest.to_string()),
+            ]));
+        } else if let Some(rest) = trimmed.strip_prefix("Change:") {
+            lines.push(Line::from(vec![
+                Span::styled("Change:", styles::title()),
+                Span::raw(rest.to_string()),
+            ]));
+        } else if let Some(rest) = trimmed.strip_prefix("Risk:") {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "Risk:",
+                    Style::default()
+                        .fg(styles::DANGER)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(rest.to_string()),
+            ]));
+        } else {
+            lines.push(Line::from(Span::raw(trimmed.to_string())));
+        }
+        lines.push(Line::from(Span::raw("")));
+    }
+    lines
 }
 
 fn current_why_target(
@@ -2060,5 +2444,241 @@ mod tests {
                 line_index: 0,
             })
         ));
+    }
+
+    #[test]
+    fn model_picker_cursor_resolves_auto_and_explicit() {
+        let models = vec![
+            "openai/gpt-5".to_string(),
+            "github-copilot/gpt-5.3-codex".to_string(),
+        ];
+
+        assert_eq!(model_picker_cursor(&WhyModelChoice::Auto, &models), 0);
+        assert_eq!(
+            model_picker_cursor(
+                &WhyModelChoice::Explicit("github-copilot/gpt-5.3-codex".to_string()),
+                &models,
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn why_cache_key_is_model_aware() {
+        let file = sample_file();
+        let target = why_target_for_file(&file);
+        let auto_key = why_cache_key(&target, "ses_1", None);
+        let explicit_key = why_cache_key(&target, "ses_1", Some("openai/gpt-5"));
+
+        assert_ne!(auto_key, explicit_key);
+        assert!(auto_key.contains(":model:auto"));
+        assert!(explicit_key.contains(":model:openai/gpt-5"));
+    }
+
+    #[test]
+    fn render_why_answer_lines_styles_named_sections() {
+        let lines =
+            render_why_answer_lines("Intent: explain\n\nChange: add picker\n\nRisk: medium");
+        assert!(lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.as_ref() == "Intent:" && span.style.fg == Some(styles::ACCENT_BRIGHT)
+            })
+        }));
+        assert!(lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.as_ref() == "Risk:" && span.style.fg == Some(styles::DANGER)
+            })
+        }));
+    }
+
+    #[test]
+    fn why_model_helpers_resolve_auto_and_explicit_modes() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+
+        assert_eq!(auto_model_label(&app), "session default");
+        assert_eq!(why_model_display_label(&app), "Auto (session default)");
+        assert_eq!(resolved_why_model(&app), None);
+
+        app.why_this.model.auto_session_model = Some("github-copilot/gpt-5.3-codex".to_string());
+        assert_eq!(
+            why_model_display_label(&app),
+            "Auto (github-copilot/gpt-5.3-codex)"
+        );
+        assert_eq!(
+            resolved_why_model(&app),
+            Some("github-copilot/gpt-5.3-codex".to_string())
+        );
+
+        app.why_this.model.choice = WhyModelChoice::Explicit("openai/gpt-5".to_string());
+        assert_eq!(why_model_display_label(&app), "openai/gpt-5");
+        assert_eq!(resolved_why_model(&app), Some("openai/gpt-5".to_string()));
+    }
+
+    #[test]
+    fn why_session_line_uses_selected_session_when_available() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        assert_eq!(why_session_line(&app), "session: none selected");
+
+        app.session_state.sessions = vec![OpencodeSession {
+            id: "ses_1".to_string(),
+            title: "Main Session".to_string(),
+            directory: PathBuf::from("."),
+            time_updated: 1,
+        }];
+        app.session_state.selected = Some(0);
+        assert_eq!(
+            why_session_line(&app),
+            "session: Main Session (ses_1)".to_string()
+        );
+    }
+
+    #[test]
+    fn clear_why_selection_for_current_file_clears_state_and_status() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            cursor_file: 0,
+            ..ReviewUiState::default()
+        });
+        app.why_this.selections.insert(
+            "src/lib.rs".to_string(),
+            WhySelection::Hunks(BTreeSet::from([0])),
+        );
+
+        clear_why_selection_for_current_file(&mut app);
+        assert!(!app.why_this.selections.contains_key("src/lib.rs"));
+        assert!(app.status.contains("Cleared Why This? grouped selection"));
+
+        clear_why_selection_for_current_file(&mut app);
+        assert!(app.status.contains("No Why This? grouped selection set"));
+    }
+
+    #[test]
+    fn handle_model_picker_key_updates_cursor_and_selection() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.overlay = Overlay::ModelPicker;
+        app.why_this.model.available = vec!["openai/gpt-5".to_string()];
+
+        handle_model_picker_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.why_this.model.cursor, 1);
+
+        handle_model_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.why_this.model.choice,
+            WhyModelChoice::Explicit(ref model) if model == "openai/gpt-5"
+        ));
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn handle_model_picker_key_selects_auto_and_supports_escape() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.overlay = Overlay::ModelPicker;
+        app.why_this.model.choice = WhyModelChoice::Explicit("openai/gpt-5".to_string());
+        app.why_this.model.cursor = 0;
+
+        handle_model_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.why_this.model.choice, WhyModelChoice::Auto);
+
+        app.overlay = Overlay::ModelPicker;
+        handle_model_picker_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn why_panel_lines_show_model_and_selection_guidance() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            cursor_file: 0,
+            ..ReviewUiState::default()
+        });
+        app.why_this.selections.insert(
+            "src/lib.rs".to_string(),
+            WhySelection::Lines(BTreeSet::from([SelectedLine {
+                hunk_index: 0,
+                line_index: 1,
+            }])),
+        );
+
+        let text = why_panel_lines(&app)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("model:"));
+        assert!(text.contains("How to Use"));
+        assert!(text.contains("ask why for focus or marks"));
+        assert!(text.contains("mark current hunk/line"));
+        assert!(text.contains("selection: 1 line(s) in this file"));
+    }
+
+    #[test]
+    fn loading_thinking_label_cycles_states() {
+        let mut animation = AnimatedTextState::with_interval(120);
+        animation.frame = 0;
+        assert_eq!(loading_thinking_label(&animation), "Thinking");
+        animation.frame = 24;
+        assert_eq!(loading_thinking_label(&animation), "Thinking.");
+        animation.frame = 48;
+        assert_eq!(loading_thinking_label(&animation), "Thinking..");
+        animation.frame = 72;
+        assert_eq!(loading_thinking_label(&animation), "Thinking...");
+    }
+
+    #[test]
+    fn render_why_answer_lines_preserves_unlabeled_paragraphs() {
+        let lines = render_why_answer_lines("General note");
+        let text = lines
+            .iter()
+            .flat_map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref().to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("General note"));
+    }
+
+    #[tokio::test]
+    async fn open_model_picker_reports_when_opencode_is_unavailable() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.opencode = None;
+
+        open_model_picker(&mut app).await;
+        assert!(app.status.contains("model selection is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn request_why_this_requires_attributed_session() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.opencode = OpencodeService::new(".").ok();
+        app.session_state.selected = None;
+
+        request_why_this(&mut app).await.unwrap();
+        assert!(app.status.contains("No opencode session is attributed"));
     }
 }

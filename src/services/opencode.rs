@@ -149,8 +149,9 @@ impl WhyTarget {
     fn prompt(&self) -> String {
         let instruction = concat!(
             "You are explaining code that was produced in this exact opencode session context. ",
-            "Reply in plain text with 3 short sections: Intent, Change, Risk. ",
-            "Be specific to the selected scope. If something is uncertain, say so explicitly."
+            "Output must be plain text with exactly these 3 headings and no others: Intent:, Change:, Risk:. ",
+            "Each heading must have only 1-2 concise lines. Do not include preamble, bullets, code blocks, or extra commentary. ",
+            "Keep each section specific to the selected scope. If uncertain, state uncertainty in the relevant section only."
         );
 
         match self {
@@ -257,11 +258,19 @@ impl OpencodeService {
             .map_err(Into::into)
     }
 
-    pub async fn ask_why(&self, session_id: &str, target: &WhyTarget) -> Result<WhyAnswer> {
+    pub async fn ask_why(
+        &self,
+        session_id: &str,
+        target: &WhyTarget,
+        model: Option<&str>,
+    ) -> Result<WhyAnswer> {
         let prompt = target.prompt();
-        let output = timeout(RUN_TIMEOUT, self.run_forked_session(session_id, &prompt))
-            .await
-            .map_err(|_| anyhow!("opencode timed out while generating a why-this explanation"))??;
+        let output = timeout(
+            RUN_TIMEOUT,
+            self.run_forked_session(session_id, &prompt, model),
+        )
+        .await
+        .map_err(|_| anyhow!("opencode timed out while generating a why-this explanation"))??;
 
         let fork_session_id = extract_session_id_from_run_output(&output)
             .context("opencode did not report a fork session id")?;
@@ -273,22 +282,85 @@ impl OpencodeService {
         })
     }
 
-    async fn run_forked_session(&self, session_id: &str, prompt: &str) -> Result<String> {
+    pub async fn list_models(&self) -> Result<Vec<String>> {
         let output = Command::new("opencode")
-            .args([
-                "run",
-                "--session",
-                session_id,
-                "--fork",
-                "--format",
-                "json",
-                "--dir",
-                self.repo_path.to_string_lossy().as_ref(),
-                prompt,
-            ])
+            .args(["models"])
             .output()
             .await
-            .context("failed to start opencode")?;
+            .context("failed to list opencode models")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "opencode model list failed{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+
+        let models = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+
+        Ok(models)
+    }
+
+    pub fn session_model(&self, session_id: &str) -> Result<Option<String>> {
+        let connection = Connection::open(&self.db_path)
+            .with_context(|| format!("failed to open {}", self.db_path.display()))?;
+        let mut statement = connection.prepare(
+            "select data from message
+             where session_id = ?1
+             order by time_created desc",
+        )?;
+        let rows = statement.query_map([session_id], |row| row.get::<_, String>(0))?;
+
+        for row in rows {
+            let data = row?;
+            let message: Value =
+                serde_json::from_str(&data).context("failed to parse opencode message JSON")?;
+            if message_role(&message) != Some("assistant") {
+                continue;
+            }
+
+            if let Some(model) = message.get("modelID").and_then(Value::as_str) {
+                let provider = message.get("providerID").and_then(Value::as_str);
+                return Ok(Some(normalize_model(provider, model)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn run_forked_session(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Result<String> {
+        let repo_dir = self.repo_path.to_string_lossy().to_string();
+        let mut command = Command::new("opencode");
+        command
+            .arg("run")
+            .arg("--session")
+            .arg(session_id)
+            .arg("--fork")
+            .arg("--format")
+            .arg("json")
+            .arg("--dir")
+            .arg(repo_dir);
+        if let Some(model) = model {
+            command.arg("--model").arg(model);
+        }
+        command.arg(prompt);
+
+        let output = command.output().await.context("failed to start opencode")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -350,6 +422,16 @@ impl OpencodeService {
         }
 
         bail!("opencode did not return a text explanation")
+    }
+}
+
+fn normalize_model(provider: Option<&str>, model: &str) -> String {
+    if model.contains('/') {
+        model.to_string()
+    } else if let Some(provider) = provider {
+        format!("{provider}/{model}")
+    } else {
+        model.to_string()
     }
 }
 
@@ -504,6 +586,12 @@ fn extract_session_id_from_run_output(output: &str) -> Option<String> {
 }
 
 fn sanitize_candidate_answer(parts: &[&str]) -> Option<String> {
+    let joined = strip_system_reminder(&parts.join("\n\n"));
+    let joined = joined.trim();
+    if let Some(structured) = extract_structured_sections(joined) {
+        return Some(structured);
+    }
+
     let cleaned = parts
         .iter()
         .filter_map(|part| sanitize_candidate_part(part))
@@ -519,11 +607,8 @@ fn sanitize_candidate_answer(parts: &[&str]) -> Option<String> {
 }
 
 fn sanitize_candidate_part(part: &str) -> Option<String> {
-    let mut cleaned = part.trim().to_string();
-    if let Some(reminder_index) = cleaned.find("<system-reminder>") {
-        cleaned.truncate(reminder_index);
-        cleaned = cleaned.trim().to_string();
-    }
+    let cleaned = strip_system_reminder(part);
+    let cleaned = cleaned.trim().to_string();
 
     if cleaned.is_empty() || looks_like_prompt_echo(&cleaned) {
         None
@@ -573,9 +658,58 @@ fn message_text_parts(
 
 fn looks_like_prompt_echo(text: &str) -> bool {
     let trimmed = text.trim();
-    trimmed.starts_with(
+    let normalized = trimmed.trim_start_matches(['"', '\'']);
+    normalized.starts_with(
         "You are explaining code that was produced in this exact opencode session context.",
-    ) || trimmed.starts_with("Scope: ")
+    ) || normalized.starts_with("Scope: ")
+}
+
+fn strip_system_reminder(text: &str) -> String {
+    let mut cleaned = text.to_string();
+    if let Some(reminder_index) = cleaned.find("<system-reminder>") {
+        cleaned.truncate(reminder_index);
+    }
+    cleaned
+}
+
+fn extract_structured_sections(text: &str) -> Option<String> {
+    let intent_index = text.find("Intent:")?;
+    let change_index = text.find("Change:")?;
+    let risk_index = text.find("Risk:")?;
+    if !(intent_index < change_index && change_index < risk_index) {
+        return None;
+    }
+
+    let intent_raw = &text[intent_index + "Intent:".len()..change_index];
+    let change_raw = &text[change_index + "Change:".len()..risk_index];
+    let risk_raw = &text[risk_index + "Risk:".len()..];
+
+    let intent = collapse_section_lines(intent_raw);
+    let change = collapse_section_lines(change_raw);
+    let risk = collapse_section_lines(risk_raw);
+    if intent.is_empty() || change.is_empty() || risk.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "Intent: {intent}\n\nChange: {change}\n\nRisk: {risk}"
+    ))
+}
+
+fn collapse_section_lines(section: &str) -> String {
+    section
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.trim_start_matches("- ")
+                .trim_start_matches("* ")
+                .trim()
+                .to_string()
+        })
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -668,6 +802,31 @@ mod tests {
         ];
 
         assert_eq!(sanitize_candidate_answer(&prompt_echo), None);
+    }
+
+    #[test]
+    fn sanitize_candidate_answer_rejects_quoted_prompt_echo_only_payloads() {
+        let prompt_echo = [
+            "\"You are explaining code that was produced in this exact opencode session context.",
+            "Scope: file",
+        ];
+
+        assert_eq!(sanitize_candidate_answer(&prompt_echo), None);
+    }
+
+    #[test]
+    fn sanitize_candidate_answer_extracts_only_intent_change_risk_from_mixed_payload() {
+        let payload = [
+            "You are explaining code that was produced in this exact opencode session context. Scope: file Path: README.md Diff: ...",
+            "Intent: document new why-this controls\n\nChange: replace Space with v/V and add model picker details\n\nRisk: users may still use old keybinds initially",
+            "<system-reminder>internal mode switch</system-reminder>",
+        ];
+
+        let answer = sanitize_candidate_answer(&payload).unwrap();
+        assert_eq!(
+            answer,
+            "Intent: document new why-this controls\n\nChange: replace Space with v/V and add model picker details\n\nRisk: users may still use old keybinds initially"
+        );
     }
 
     #[test]
@@ -764,6 +923,40 @@ mod tests {
         let service = OpencodeService { repo_path, db_path };
         let answer = service.latest_assistant_text("ses_1").unwrap();
         assert_eq!(answer, "Intent: useful answer");
+    }
+
+    #[test]
+    fn session_model_reads_provider_and_model_from_latest_assistant_message() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("opencode.db");
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let connection = Connection::open(&db_path).unwrap();
+        create_message_tables(&connection);
+        insert_message(
+            &connection,
+            "ses_1",
+            "msg_assistant",
+            1,
+            json!({
+                "role": "assistant",
+                "providerID": "github-copilot",
+                "modelID": "gpt-5.3-codex"
+            }),
+        );
+
+        let service = OpencodeService { repo_path, db_path };
+        let model = service.session_model("ses_1").unwrap();
+        assert_eq!(model, Some("github-copilot/gpt-5.3-codex".to_string()));
+    }
+
+    #[test]
+    fn normalize_model_keeps_fully_qualified_model_unchanged() {
+        assert_eq!(
+            normalize_model(Some("openai"), "openai/gpt-5"),
+            "openai/gpt-5"
+        );
     }
 
     #[test]
