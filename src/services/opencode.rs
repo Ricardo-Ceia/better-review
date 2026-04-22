@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::Connection;
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
@@ -23,8 +24,27 @@ pub struct OpencodeSession {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WhyAnswer {
-    pub content: String,
+    pub intent: String,
+    pub change: String,
+    pub risk_level: WhyRiskLevel,
+    pub risk: String,
     pub fork_session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WhyRiskLevel {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct WhyAnswerPayload {
+    intent: String,
+    change: String,
+    risk_level: WhyRiskLevel,
+    risk: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,9 +169,9 @@ impl WhyTarget {
     fn prompt(&self) -> String {
         let instruction = concat!(
             "You are explaining code that was produced in this exact opencode session context. ",
-            "Output must be plain text with exactly these 3 headings and no others: Intent:, Change:, Risk:. ",
-            "Each heading must have only 1-2 concise lines. Do not include preamble, bullets, code blocks, or extra commentary. ",
-            "Keep each section specific to the selected scope. If uncertain, state uncertainty in the relevant section only."
+            "Return ONLY valid JSON with no markdown, no code fences, and no extra text. ",
+            "Schema exactly: {\"intent\":string,\"change\":string,\"risk_level\":\"low\"|\"medium\"|\"high\",\"risk\":string}. ",
+            "Each field must be concise plain text. Keep it specific to the selected scope. If uncertain, say so in the relevant field only."
         );
 
         match self {
@@ -274,10 +294,13 @@ impl OpencodeService {
 
         let fork_session_id = extract_session_id_from_run_output(&output)
             .context("opencode did not report a fork session id")?;
-        let content = self.wait_for_answer(&fork_session_id).await?;
+        let payload = self.wait_for_answer(&fork_session_id).await?;
 
         Ok(WhyAnswer {
-            content,
+            intent: payload.intent,
+            change: payload.change,
+            risk_level: payload.risk_level,
+            risk: payload.risk,
             fork_session_id,
         })
     }
@@ -377,7 +400,7 @@ impl OpencodeService {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    async fn wait_for_answer(&self, session_id: &str) -> Result<String> {
+    async fn wait_for_answer(&self, session_id: &str) -> Result<WhyAnswerPayload> {
         let mut last_error = None;
 
         for attempt in 0..ANSWER_LOOKUP_ATTEMPTS {
@@ -394,7 +417,7 @@ impl OpencodeService {
         Err(last_error.unwrap_or_else(|| anyhow!("opencode did not persist a forked answer")))
     }
 
-    fn latest_assistant_text(&self, session_id: &str) -> Result<String> {
+    fn latest_assistant_text(&self, session_id: &str) -> Result<WhyAnswerPayload> {
         let connection = Connection::open(&self.db_path)
             .with_context(|| format!("failed to open {}", self.db_path.display()))?;
         let mut statement = connection.prepare(
@@ -416,12 +439,12 @@ impl OpencodeService {
 
             let text_parts = message_text_parts(&connection, session_id, &message_id)?;
             let text_refs = text_parts.iter().map(String::as_str).collect::<Vec<_>>();
-            if let Some(answer) = sanitize_candidate_answer(&text_refs) {
+            if let Some(answer) = parse_candidate_answer(&text_refs)? {
                 return Ok(answer);
             }
         }
 
-        bail!("opencode did not return a text explanation")
+        bail!("opencode did not return a valid why-this JSON explanation")
     }
 }
 
@@ -585,25 +608,40 @@ fn extract_session_id_from_run_output(output: &str) -> Option<String> {
     })
 }
 
-fn sanitize_candidate_answer(parts: &[&str]) -> Option<String> {
-    let joined = strip_system_reminder(&parts.join("\n\n"));
-    let joined = joined.trim();
-    if let Some(structured) = extract_structured_sections(joined) {
-        return Some(structured);
-    }
-
+fn parse_candidate_answer(parts: &[&str]) -> Result<Option<WhyAnswerPayload>> {
     let cleaned = parts
         .iter()
         .filter_map(|part| sanitize_candidate_part(part))
         .collect::<Vec<_>>()
-        .join("\n\n");
+        .join("\n");
     let cleaned = cleaned.trim().to_string();
 
     if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned)
+        return Ok(None);
     }
+
+    let payload: WhyAnswerPayload =
+        serde_json::from_str(&cleaned).context("failed to parse why-this JSON payload")?;
+    Ok(Some(normalize_payload(payload)))
+}
+
+fn normalize_payload(payload: WhyAnswerPayload) -> WhyAnswerPayload {
+    WhyAnswerPayload {
+        intent: normalize_answer_field(&payload.intent),
+        change: normalize_answer_field(&payload.change),
+        risk_level: payload.risk_level,
+        risk: normalize_answer_field(&payload.risk),
+    }
+}
+
+fn normalize_answer_field(value: &str) -> String {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn sanitize_candidate_part(part: &str) -> Option<String> {
@@ -672,46 +710,6 @@ fn strip_system_reminder(text: &str) -> String {
     cleaned
 }
 
-fn extract_structured_sections(text: &str) -> Option<String> {
-    let intent_index = text.find("Intent:")?;
-    let change_index = text.find("Change:")?;
-    let risk_index = text.find("Risk:")?;
-    if !(intent_index < change_index && change_index < risk_index) {
-        return None;
-    }
-
-    let intent_raw = &text[intent_index + "Intent:".len()..change_index];
-    let change_raw = &text[change_index + "Change:".len()..risk_index];
-    let risk_raw = &text[risk_index + "Risk:".len()..];
-
-    let intent = collapse_section_lines(intent_raw);
-    let change = collapse_section_lines(change_raw);
-    let risk = collapse_section_lines(risk_raw);
-    if intent.is_empty() || change.is_empty() || risk.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "Intent: {intent}\n\nChange: {change}\n\nRisk: {risk}"
-    ))
-}
-
-fn collapse_section_lines(section: &str) -> String {
-    section
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            line.trim_start_matches("- ")
-                .trim_start_matches("* ")
-                .trim()
-                .to_string()
-        })
-        .take(2)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,58 +772,76 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_candidate_answer_keeps_non_empty_text_parts() {
-        let answer = sanitize_candidate_answer(&["Intent: update parser", "Risk: low"]).unwrap();
-        assert_eq!(answer, "Intent: update parser\n\nRisk: low");
-    }
-
-    #[test]
-    fn sanitize_candidate_answer_ignores_prompt_echo_and_system_reminders() {
-        let answer = sanitize_candidate_answer(&[
-            "You are explaining code that was produced in this exact opencode session context.\n\nScope: hunk\nPath: Cargo.lock",
-            "<system-reminder>\nYour operational mode has changed from plan to build.\n</system-reminder>",
-            "Intent: add SQLite-backed session discovery\n\nChange: add rusqlite and a Why This panel\n\nRisk: the export parser must ignore prompt echoes.",
+    fn parse_candidate_answer_parses_valid_json_payload() {
+        let answer = parse_candidate_answer(&[
+            r#"{"intent":"update parser","change":"tighten output schema","risk_level":"low","risk":"small formatting drift"}"#,
         ])
+        .unwrap()
         .unwrap();
 
-        assert_eq!(
-            answer,
-            "Intent: add SQLite-backed session discovery\n\nChange: add rusqlite and a Why This panel\n\nRisk: the export parser must ignore prompt echoes."
-        );
+        assert_eq!(answer.intent, "update parser");
+        assert_eq!(answer.change, "tighten output schema");
+        assert_eq!(answer.risk_level, WhyRiskLevel::Low);
+        assert_eq!(answer.risk, "small formatting drift");
     }
 
     #[test]
-    fn sanitize_candidate_answer_rejects_prompt_echo_only_payloads() {
+    fn parse_candidate_answer_ignores_prompt_echo_and_system_reminders() {
+        let answer = parse_candidate_answer(&[
+            "You are explaining code that was produced in this exact opencode session context.\n\nScope: hunk\nPath: Cargo.lock",
+            "<system-reminder>\nYour operational mode has changed from plan to build.\n</system-reminder>",
+            r#"{"intent":"add SQLite-backed session discovery","change":"add rusqlite and a Why This panel","risk_level":"medium","risk":"the parser must ignore prompt echoes"}"#,
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(answer.intent, "add SQLite-backed session discovery");
+        assert_eq!(answer.change, "add rusqlite and a Why This panel");
+        assert_eq!(answer.risk_level, WhyRiskLevel::Medium);
+        assert_eq!(answer.risk, "the parser must ignore prompt echoes");
+    }
+
+    #[test]
+    fn parse_candidate_answer_rejects_prompt_echo_only_payloads() {
         let prompt_echo = [
             "You are explaining code that was produced in this exact opencode session context.",
             "Scope: line",
         ];
 
-        assert_eq!(sanitize_candidate_answer(&prompt_echo), None);
+        assert_eq!(parse_candidate_answer(&prompt_echo).unwrap(), None);
     }
 
     #[test]
-    fn sanitize_candidate_answer_rejects_quoted_prompt_echo_only_payloads() {
+    fn parse_candidate_answer_rejects_quoted_prompt_echo_only_payloads() {
         let prompt_echo = [
             "\"You are explaining code that was produced in this exact opencode session context.",
             "Scope: file",
         ];
 
-        assert_eq!(sanitize_candidate_answer(&prompt_echo), None);
+        assert_eq!(parse_candidate_answer(&prompt_echo).unwrap(), None);
     }
 
     #[test]
-    fn sanitize_candidate_answer_extracts_only_intent_change_risk_from_mixed_payload() {
+    fn parse_candidate_answer_normalizes_multiline_fields() {
         let payload = [
             "You are explaining code that was produced in this exact opencode session context. Scope: file Path: README.md Diff: ...",
-            "Intent: document new why-this controls\n\nChange: replace Space with v/V and add model picker details\n\nRisk: users may still use old keybinds initially",
+            r#"{"intent":"document new why-this controls\nwith deterministic output","change":"replace Space with v/V\nand add model picker details","risk_level":"medium","risk":"users may still use old keybinds initially\nuntil they relearn the flow"}"#,
             "<system-reminder>internal mode switch</system-reminder>",
         ];
 
-        let answer = sanitize_candidate_answer(&payload).unwrap();
+        let answer = parse_candidate_answer(&payload).unwrap().unwrap();
         assert_eq!(
-            answer,
-            "Intent: document new why-this controls\n\nChange: replace Space with v/V and add model picker details\n\nRisk: users may still use old keybinds initially"
+            answer.intent,
+            "document new why-this controls\nwith deterministic output"
+        );
+        assert_eq!(
+            answer.change,
+            "replace Space with v/V\nand add model picker details"
+        );
+        assert_eq!(answer.risk_level, WhyRiskLevel::Medium);
+        assert_eq!(
+            answer.risk,
+            "users may still use old keybinds initially\nuntil they relearn the flow"
         );
     }
 
@@ -864,19 +880,15 @@ mod tests {
             "ses_1",
             "msg_assistant",
             2,
-            json!({ "type": "text", "text": "Intent: explain change" }),
-        );
-        insert_part(
-            &connection,
-            "ses_1",
-            "msg_assistant",
-            3,
-            json!({ "type": "text", "text": "Risk: low" }),
+            json!({ "type": "text", "text": r#"{"intent":"explain change","change":"summarize delta","risk_level":"low","risk":"minimal regression risk"}"# }),
         );
 
         let service = OpencodeService { repo_path, db_path };
         let answer = service.latest_assistant_text("ses_1").unwrap();
-        assert_eq!(answer, "Intent: explain change\n\nRisk: low");
+        assert_eq!(answer.intent, "explain change");
+        assert_eq!(answer.change, "summarize delta");
+        assert_eq!(answer.risk_level, WhyRiskLevel::Low);
+        assert_eq!(answer.risk, "minimal regression risk");
     }
 
     #[test]
@@ -900,7 +912,7 @@ mod tests {
             "ses_1",
             "msg_answer",
             1,
-            json!({ "type": "text", "text": "Intent: useful answer" }),
+            json!({ "type": "text", "text": r#"{"intent":"useful answer","change":"explain current diff","risk_level":"low","risk":"small chance of over-summary"}"# }),
         );
         insert_message(
             &connection,
@@ -922,7 +934,7 @@ mod tests {
 
         let service = OpencodeService { repo_path, db_path };
         let answer = service.latest_assistant_text("ses_1").unwrap();
-        assert_eq!(answer, "Intent: useful answer");
+        assert_eq!(answer.intent, "useful answer");
     }
 
     #[test]

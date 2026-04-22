@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
 use crate::services::git::GitService;
 use crate::services::opencode::{
-    OpencodeService, OpencodeSession, WhyAnswer, WhyTarget, why_target_for_file,
+    OpencodeService, OpencodeSession, WhyAnswer, WhyRiskLevel, WhyTarget, why_target_for_file,
     why_target_for_hunk, why_target_for_line, why_target_for_selected_hunks,
     why_target_for_selected_lines,
 };
@@ -1462,7 +1462,7 @@ fn why_panel_lines(app: &App) -> Vec<Line<'static>> {
                 styles::subtle(),
             )));
             lines.push(Line::from(Span::raw("")));
-            lines.extend(render_why_answer_lines(&answer.content));
+            lines.extend(render_why_answer_lines(answer));
         }
         WhyThisPanel::Failed { label, error } => {
             lines.push(Line::from(Span::raw("")));
@@ -1827,40 +1827,43 @@ fn loading_thinking_label(animation: &AnimatedTextState) -> String {
     format!("Thinking{dots}")
 }
 
-fn render_why_answer_lines(content: &str) -> Vec<Line<'static>> {
+fn render_why_answer_lines(answer: &WhyAnswer) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for paragraph in content.split("\n\n") {
-        let trimmed = paragraph.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if let Some(rest) = trimmed.strip_prefix("Intent:") {
-            lines.push(Line::from(vec![
-                Span::styled("Intent:", styles::accent_bold()),
-                Span::raw(rest.to_string()),
-            ]));
-        } else if let Some(rest) = trimmed.strip_prefix("Change:") {
-            lines.push(Line::from(vec![
-                Span::styled("Change:", styles::title()),
-                Span::raw(rest.to_string()),
-            ]));
-        } else if let Some(rest) = trimmed.strip_prefix("Risk:") {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "Risk:",
-                    Style::default()
-                        .fg(styles::DANGER)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(rest.to_string()),
-            ]));
-        } else {
-            lines.push(Line::from(Span::raw(trimmed.to_string())));
-        }
-        lines.push(Line::from(Span::raw("")));
-    }
+    lines.extend(render_why_section(
+        "Intent:",
+        styles::accent_bold(),
+        &answer.intent,
+    ));
+    lines.extend(render_why_section(
+        "Change:",
+        styles::title(),
+        &answer.change,
+    ));
+    lines.extend(render_why_section(
+        &format!("Risk ({}):", risk_level_label(answer.risk_level.clone())),
+        Style::default()
+            .fg(styles::DANGER)
+            .add_modifier(Modifier::BOLD),
+        &answer.risk,
+    ));
     lines
+}
+
+fn render_why_section(label: &str, label_style: Style, body: &str) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(label.to_string(), label_style))];
+    for line in body.lines() {
+        lines.push(Line::from(Span::raw(line.to_string())));
+    }
+    lines.push(Line::from(Span::raw("")));
+    lines
+}
+
+fn risk_level_label(level: WhyRiskLevel) -> &'static str {
+    match level {
+        WhyRiskLevel::Low => "low",
+        WhyRiskLevel::Medium => "medium",
+        WhyRiskLevel::High => "high",
+    }
 }
 
 fn current_why_target(
@@ -2477,8 +2480,13 @@ mod tests {
 
     #[test]
     fn render_why_answer_lines_styles_named_sections() {
-        let lines =
-            render_why_answer_lines("Intent: explain\n\nChange: add picker\n\nRisk: medium");
+        let lines = render_why_answer_lines(&WhyAnswer {
+            intent: "explain".to_string(),
+            change: "add picker".to_string(),
+            risk_level: WhyRiskLevel::Medium,
+            risk: "medium impact".to_string(),
+            fork_session_id: "ses_1".to_string(),
+        });
         assert!(lines.iter().any(|line| {
             line.spans.iter().any(|span| {
                 span.content.as_ref() == "Intent:" && span.style.fg == Some(styles::ACCENT_BRIGHT)
@@ -2486,7 +2494,7 @@ mod tests {
         }));
         assert!(lines.iter().any(|line| {
             line.spans.iter().any(|span| {
-                span.content.as_ref() == "Risk:" && span.style.fg == Some(styles::DANGER)
+                span.content.as_ref() == "Risk (medium):" && span.style.fg == Some(styles::DANGER)
             })
         }));
     }
@@ -2644,7 +2652,13 @@ mod tests {
 
     #[test]
     fn render_why_answer_lines_preserves_unlabeled_paragraphs() {
-        let lines = render_why_answer_lines("General note");
+        let lines = render_why_answer_lines(&WhyAnswer {
+            intent: "General note".to_string(),
+            change: "Specific delta".to_string(),
+            risk_level: WhyRiskLevel::Low,
+            risk: "Limited risk".to_string(),
+            fork_session_id: "ses_1".to_string(),
+        });
         let text = lines
             .iter()
             .flat_map(|line| {
@@ -2655,6 +2669,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("General note"));
+        assert!(text.contains("Specific delta"));
+        assert!(text.contains("Limited risk"));
     }
 
     #[tokio::test]
