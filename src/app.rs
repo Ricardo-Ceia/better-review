@@ -519,7 +519,11 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                     }
 
                     if key.code == KeyCode::Char('c') {
-                        if app.review_busy {
+                        if app.review.files.is_empty() {
+                            app.status =
+                                "Cannot commit yet because there are no reviewable changes in this repository."
+                                    .to_string();
+                        } else if app.review_busy {
                             app.status =
                                 "Wait for the current review update to finish.".to_string();
                         } else {
@@ -2587,6 +2591,28 @@ mod tests {
         let counts = app.review_counts();
         assert_eq!(counts.unreviewed, 0);
         assert_eq!(counts.accepted, 2);
+    }
+
+    #[tokio::test]
+    async fn open_commit_from_home_without_reviewable_changes_sets_status_message() {
+        let mut app = sample_app(ReviewUiState::default());
+        app.screen = Screen::Home;
+
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+        if key.code == KeyCode::Char('c') {
+            if app.review.files.is_empty() {
+                app.status =
+                    "Cannot commit yet because there are no reviewable changes in this repository."
+                        .to_string();
+            } else if app.review_busy {
+                app.status = "Wait for the current review update to finish.".to_string();
+            } else {
+                let _ = app.open_commit_prompt();
+            }
+        }
+
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.status.contains("there are no reviewable changes"));
     }
 
     #[test]
