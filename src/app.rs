@@ -21,6 +21,7 @@ use ratatui_core::widgets::Widget;
 use ratatui_interact::components::{AnimatedText, AnimatedTextState, AnimatedTextStyle};
 use ratatui_textarea::{TextArea, WrapMode};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
 use crate::services::git::GitService;
@@ -80,7 +81,7 @@ enum Overlay {
     CommitPrompt,
     SessionPicker,
     ModelPicker,
-    WhyThis,
+    ExplainHistory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +115,7 @@ enum Message {
         result: Result<(), String>,
     },
     WhyThis {
+        job_id: u64,
         cache_key: String,
         label: String,
         result: Result<WhyAnswer, String>,
@@ -133,9 +135,34 @@ struct SessionUiState {
 #[derive(Default)]
 struct WhyThisUiState {
     cache: HashMap<String, WhyAnswer>,
-    panel: WhyThisPanel,
+    runs: Vec<ExplainRun>,
+    current_run_id: Option<u64>,
+    history_cursor: usize,
+    next_run_id: u64,
     selections: HashMap<String, WhySelection>,
     model: WhyModelState,
+}
+
+struct ExplainRun {
+    id: u64,
+    label: String,
+    target: WhyTarget,
+    context_source_id: String,
+    context_source_label: String,
+    requested_model: Option<String>,
+    model_label: String,
+    cache_key: String,
+    status: ExplainRunStatus,
+    result: Option<WhyAnswer>,
+    error: Option<String>,
+    handle: Option<JoinHandle<()>>,
+}
+
+enum ExplainRunStatus {
+    Running,
+    Ready,
+    Failed,
+    Cancelled,
 }
 
 #[derive(Default)]
@@ -166,23 +193,6 @@ enum WhySelection {
 struct SelectedLine {
     hunk_index: usize,
     line_index: usize,
-}
-
-#[derive(Default)]
-enum WhyThisPanel {
-    #[default]
-    Empty,
-    Loading {
-        label: String,
-    },
-    Ready {
-        label: String,
-        answer: WhyAnswer,
-    },
-    Failed {
-        label: String,
-        error: String,
-    },
 }
 
 impl App {
@@ -401,23 +411,40 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                     }
                 }
                 Message::WhyThis {
+                    job_id,
                     cache_key,
                     label,
                     result,
                 } => {
-                    app.review_busy = false;
-                    match result {
-                        Ok(answer) => {
-                            app.status = format!("Loaded why-this for {label}.");
-                            app.why_this.cache.insert(cache_key, answer.clone());
-                            app.why_this.panel = WhyThisPanel::Ready { label, answer };
-                            app.overlay = Overlay::WhyThis;
+                    if let Some(index) = find_explain_run_index_by_id(&app.why_this, job_id) {
+                        let is_running = matches!(
+                            app.why_this.runs.get(index).map(|run| &run.status),
+                            Some(ExplainRunStatus::Running)
+                        );
+                        if !is_running {
+                            continue;
                         }
-                        Err(error) => {
-                            app.status = format!("Could not load why-this: {error}");
-                            app.why_this.panel = WhyThisPanel::Failed { label, error };
-                            app.overlay = Overlay::WhyThis;
+
+                        if let Some(run) = app.why_this.runs.get_mut(index) {
+                            run.handle = None;
+                            match result {
+                                Ok(answer) => {
+                                    app.status = format!("Loaded explanation for {label}.");
+                                    app.why_this.cache.insert(cache_key, answer.clone());
+                                    run.status = ExplainRunStatus::Ready;
+                                    run.result = Some(answer);
+                                    run.error = None;
+                                }
+                                Err(error) => {
+                                    app.status = format!("Could not explain change: {error}");
+                                    run.status = ExplainRunStatus::Failed;
+                                    run.error = Some(error);
+                                    run.result = None;
+                                }
+                            }
                         }
+                        app.why_this.current_run_id = Some(job_id);
+                        app.why_this.history_cursor = index;
                     }
                 }
                 Message::ModelList { result } => {
@@ -439,13 +466,13 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                             app.why_this.model.last_error = None;
                             if app.overlay == Overlay::ModelPicker {
                                 app.status =
-                                    "Choose the model for Why This? (or keep Auto).".to_string();
+                                    "Choose the model for Explain (or keep Auto).".to_string();
                             }
                         }
                         Err(error) => {
                             app.why_this.model.last_error = Some(error.clone());
                             if app.overlay == Overlay::ModelPicker {
-                                app.status = format!("Could not load Why This? models: {error}");
+                                app.status = format!("Could not load Explain models: {error}");
                             }
                         }
                     }
@@ -477,7 +504,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                 },
                 Overlay::SessionPicker => handle_session_picker_key(&mut app, key),
                 Overlay::ModelPicker => handle_model_picker_key(&mut app, key),
-                Overlay::WhyThis => handle_why_this_overlay_key(&mut app, key),
+                Overlay::ExplainHistory => handle_explain_history_key(&mut app, key),
                 Overlay::None => {
                     if key.code == KeyCode::Enter && app.screen == Screen::Home {
                         if app.review.files.is_empty() {
@@ -662,12 +689,15 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                     app.session_state.cursor = selected;
                 }
                 app.overlay = Overlay::SessionPicker;
-                app.status = "Choose which opencode session Why This? should use.".to_string();
+                app.status = "Choose which context source Explain should use.".to_string();
             }
         }
-        KeyCode::Char('w') => {
-            request_why_this(app).await?;
+        KeyCode::Char('e') => {
+            request_explain(app).await?;
         }
+        KeyCode::Char('h') => open_explain_history(app),
+        KeyCode::Char('r') => retry_current_explain(app).await?,
+        KeyCode::Char('z') => cancel_current_explain(app),
         KeyCode::Char('v') => {
             toggle_why_selection(app);
         }
@@ -698,17 +728,26 @@ fn handle_session_picker_key(app: &mut App, key: KeyEvent) {
             app.refresh_auto_model();
             app.overlay = Overlay::None;
             if let Some(session) = app.active_session() {
-                app.status = format!("Why This? will use opencode session {}.", session.title);
+                app.status = format!("Explain will use context source {}.", session.title);
             }
         }
         _ => {}
     }
 }
 
-fn handle_why_this_overlay_key(app: &mut App, key: KeyEvent) {
-    if key.code == KeyCode::Esc {
-        app.overlay = Overlay::None;
-        app.status = "Why This? pane closed.".to_string();
+fn handle_explain_history_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = Overlay::None;
+            app.status = "Explain history closed.".to_string();
+        }
+        KeyCode::Up | KeyCode::Char('k') => move_explain_history_cursor(app, -1),
+        KeyCode::Down | KeyCode::Char('j') => move_explain_history_cursor(app, 1),
+        KeyCode::Enter => focus_history_run(app),
+        KeyCode::Char('r') => retry_history_run(app),
+        KeyCode::Char('z') => cancel_history_run(app),
+        KeyCode::Backspace | KeyCode::Delete => clear_history_run(app),
+        _ => {}
     }
 }
 
@@ -717,7 +756,7 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
             app.overlay = Overlay::None;
-            app.status = "Why This? model picker closed.".to_string();
+            app.status = "Explain model picker closed.".to_string();
         }
         KeyCode::Up | KeyCode::Char('k') => {
             app.why_this.model.cursor = app.why_this.model.cursor.saturating_sub(1);
@@ -728,7 +767,7 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             if app.why_this.model.cursor == 0 {
                 app.why_this.model.choice = WhyModelChoice::Auto;
-                app.status = format!("Why This? model set to {}.", why_model_display_label(app));
+                app.status = format!("Explain model set to {}.", why_model_display_label(app));
             } else if let Some(model) = app
                 .why_this
                 .model
@@ -737,7 +776,7 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
                 .cloned()
             {
                 app.why_this.model.choice = WhyModelChoice::Explicit(model.clone());
-                app.status = format!("Why This? model set to {model}.");
+                app.status = format!("Explain model set to {model}.");
             }
             app.overlay = Overlay::None;
         }
@@ -747,9 +786,8 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
 
 async fn open_model_picker(app: &mut App) {
     let Some(opencode) = app.opencode.clone() else {
-        app.status =
-            "Why This? model selection is unavailable because opencode is not initialized."
-                .to_string();
+        app.status = "Explain model selection is unavailable because opencode is not initialized."
+            .to_string();
         return;
     };
 
@@ -763,17 +801,17 @@ async fn open_model_picker(app: &mut App) {
         .last_loaded_at
         .is_some_and(|loaded_at| loaded_at.elapsed() < MODEL_CACHE_TTL);
     if is_cache_fresh && !app.why_this.model.available.is_empty() {
-        app.status = "Choose the model for Why This? (or keep Auto).".to_string();
+        app.status = "Choose the model for Explain (or keep Auto).".to_string();
         return;
     }
 
     if app.why_this.model.loading {
-        app.status = "Loading Why This? models...".to_string();
+        app.status = "Loading Explain models...".to_string();
         return;
     }
 
     app.why_this.model.loading = true;
-    app.status = "Loading Why This? models...".to_string();
+    app.status = "Loading Explain models...".to_string();
 
     let tx = app.tx.clone();
     tokio::spawn(async move {
@@ -782,52 +820,128 @@ async fn open_model_picker(app: &mut App) {
     });
 }
 
-async fn request_why_this(app: &mut App) -> Result<()> {
-    let Some(opencode) = app.opencode.clone() else {
+async fn request_explain(app: &mut App) -> Result<()> {
+    let Some(_opencode) = app.opencode.clone() else {
         app.status =
-            "Why This? is unavailable because opencode could not be initialized.".to_string();
+            "Explain is unavailable because opencode could not be initialized.".to_string();
         return Ok(());
     };
     let Some(session) = app.active_session().cloned() else {
-        app.status = "No opencode session is attributed to this repository. Press s to choose one."
+        app.status = "No context source is attributed to this repository. Press s to choose one."
             .to_string();
         return Ok(());
     };
 
     let Some((label, target)) = current_why_target(&app.review, &app.why_this) else {
-        app.status = "Nothing is selected for Why This?.".to_string();
+        app.status = "Nothing is selected for Explain.".to_string();
         return Ok(());
     };
 
     let resolved_model = resolved_why_model(app);
-    let cache_key = why_cache_key(&target, &session.id, resolved_model.as_deref());
-    if let Some(answer) = app.why_this.cache.get(&cache_key).cloned() {
-        app.overlay = Overlay::WhyThis;
-        app.why_this.panel = WhyThisPanel::Ready { label, answer };
-        app.status = "Showing cached why-this explanation.".to_string();
+    let session_id = session.id.clone();
+    let session_label = format!("{} ({})", session.title, session.id);
+    let model_label = why_model_display_label(app);
+    request_explain_with_target(
+        app,
+        label,
+        target,
+        session_id,
+        session_label,
+        resolved_model,
+        model_label,
+    )
+    .await
+}
+
+async fn request_explain_with_target(
+    app: &mut App,
+    label: String,
+    target: WhyTarget,
+    context_source_id: String,
+    context_source_label: String,
+    requested_model: Option<String>,
+    model_label: String,
+) -> Result<()> {
+    let Some(opencode) = app.opencode.clone() else {
+        app.status =
+            "Explain is unavailable because opencode could not be initialized.".to_string();
+        return Ok(());
+    };
+
+    let cache_key = why_cache_key(&target, &context_source_id, requested_model.as_deref());
+    if let Some(index) = find_reusable_explain_run_index(&app.why_this, &cache_key) {
+        if let Some(run) = app.why_this.runs.get(index) {
+            app.why_this.current_run_id = Some(run.id);
+            app.why_this.history_cursor = index;
+        }
+        app.status = "Focused existing explanation.".to_string();
         return Ok(());
     }
 
-    let tx = app.tx.clone();
-    app.review_busy = true;
-    app.overlay = Overlay::WhyThis;
-    app.why_this.panel = WhyThisPanel::Loading {
-        label: label.clone(),
-    };
-    let model_display = why_model_display_label(app);
-    app.status = format!("Asking opencode why this exists for {label} using {model_display}...");
+    if let Some(answer) = app.why_this.cache.get(&cache_key).cloned() {
+        let run_id = next_explain_run_id(&mut app.why_this);
+        app.why_this.runs.push(ExplainRun {
+            id: run_id,
+            label: label.clone(),
+            target,
+            context_source_id,
+            context_source_label,
+            requested_model,
+            model_label,
+            cache_key,
+            status: ExplainRunStatus::Ready,
+            result: Some(answer),
+            error: None,
+            handle: None,
+        });
+        app.why_this.current_run_id = Some(run_id);
+        app.why_this.history_cursor = app.why_this.runs.len().saturating_sub(1);
+        app.status = "Loaded cached explanation.".to_string();
+        return Ok(());
+    }
 
-    tokio::spawn(async move {
+    let run_id = next_explain_run_id(&mut app.why_this);
+    let cache_key_for_message = cache_key.clone();
+    let target_for_run = target.clone();
+    let requested_model_for_task = requested_model.clone();
+    let context_source_id_for_task = context_source_id.clone();
+    let tx = app.tx.clone();
+
+    app.status = format!("Explaining {label} using {model_label}.");
+
+    let handle = tokio::spawn(async move {
         let result = opencode
-            .ask_why(&session.id, &target, resolved_model.as_deref())
+            .ask_why(
+                &context_source_id_for_task,
+                &target,
+                requested_model_for_task.as_deref(),
+            )
             .await
             .map_err(|err| err.to_string());
         let _ = tx.send(Message::WhyThis {
-            cache_key,
+            job_id: run_id,
+            cache_key: cache_key_for_message,
             label,
             result,
         });
     });
+
+    app.why_this.runs.push(ExplainRun {
+        id: run_id,
+        label: target_for_run.label(),
+        target: target_for_run,
+        context_source_id,
+        context_source_label,
+        requested_model,
+        model_label,
+        cache_key,
+        status: ExplainRunStatus::Running,
+        result: None,
+        error: None,
+        handle: Some(handle),
+    });
+    app.why_this.current_run_id = Some(run_id);
+    app.why_this.history_cursor = app.why_this.runs.len().saturating_sub(1);
 
     Ok(())
 }
@@ -850,7 +964,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
         Overlay::CommitPrompt => draw_commit_prompt(frame, layout[1], app, commit_message),
         Overlay::SessionPicker => draw_session_picker(frame, layout[1], app),
         Overlay::ModelPicker => draw_model_picker(frame, layout[1], app),
-        Overlay::WhyThis => draw_why_this(frame, layout[1], app),
+        Overlay::ExplainHistory => draw_explain_history(frame, layout[1], app),
         Overlay::None => {}
     }
 }
@@ -1081,8 +1195,6 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             styles::soft_accent(),
         ),
     ])];
-    let mut line_hunks = vec![None];
-
     if let Some(file) = app.review.files.get(app.review.cursor_file) {
         let selection = app.why_this.selections.get(file.display_path());
         for (index, hunk) in file.hunks.iter().enumerate() {
@@ -1132,7 +1244,6 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 ),
                 status,
             ]));
-            line_hunks.push(Some(index));
             for (line_index, line) in hunk.lines.iter().enumerate() {
                 let is_current_line = app.review.focus == ReviewFocus::Hunks
                     && app.review.cursor_line == diff_lines.len();
@@ -1179,10 +1290,8 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     Span::styled(prefix, style),
                     Span::styled(line.content.clone(), style),
                 ]));
-                line_hunks.push(Some(index));
             }
             diff_lines.push(Line::from(Span::raw("")));
-            line_hunks.push(Some(index));
         }
     }
 
@@ -1191,11 +1300,11 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(diff, sections[1]);
 
     let why_block = Block::default()
-        .title(Line::from(Span::styled("Why This?", styles::title())))
+        .title(Line::from(Span::styled("Explain", styles::title())))
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(styles::BORDER_MUTED))
         .style(Style::default().bg(styles::SURFACE_RAISED));
-    let why_lines = why_panel_lines(app);
+    let why_lines = explain_panel_lines(app);
     frame.render_widget(
         Paragraph::new(why_lines)
             .block(why_block)
@@ -1250,7 +1359,7 @@ fn draw_session_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         List::new(items).block(
             Block::default()
                 .title(Line::from(Span::styled(
-                    "Choose opencode session",
+                    "Choose context source",
                     styles::title(),
                 )))
                 .borders(Borders::ALL)
@@ -1330,7 +1439,7 @@ fn draw_model_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         List::new(rows).block(
             Block::default()
                 .title(Line::from(Span::styled(
-                    "Choose Why This? model",
+                    "Choose Explain model",
                     styles::title(),
                 )))
                 .borders(Borders::ALL)
@@ -1376,14 +1485,14 @@ fn model_picker_item(
     ]))
 }
 
-fn draw_why_this(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let modal = centered_rect(70, 52, area);
+fn draw_explain_history(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let modal = centered_rect(70, 56, area);
     frame.render_widget(Clear, modal);
     frame.render_widget(
-        Paragraph::new(why_panel_lines(app))
+        Paragraph::new(explain_history_lines(app))
             .block(
                 Block::default()
-                    .title(Line::from(Span::styled("Why This?", styles::title())))
+                    .title(Line::from(Span::styled("Explain History", styles::title())))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
                     .style(Style::default().bg(styles::SURFACE_RAISED)),
@@ -1394,11 +1503,24 @@ fn draw_why_this(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     );
 }
 
-fn why_panel_lines(app: &App) -> Vec<Line<'static>> {
-    let session_line = why_session_line(app);
+fn explain_panel_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = explain_context_lines(app);
 
+    let Some(run) = current_explain_run(app) else {
+        lines.extend(explain_empty_lines());
+        return lines;
+    };
+
+    lines.push(Line::from(Span::raw("")));
+    lines.extend(render_explain_run_lines(run, &app.logo_animation));
+    lines.push(Line::from(Span::raw("")));
+    lines.extend(explain_footer_lines(app));
+    lines
+}
+
+fn explain_context_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
-        session_line,
+        explain_context_source_line(app),
         styles::soft_accent(),
     ))];
     lines.push(Line::from(Span::styled(
@@ -1408,55 +1530,175 @@ fn why_panel_lines(app: &App) -> Vec<Line<'static>> {
     if let Some(selection_summary) = current_selection_summary(app) {
         lines.push(Line::from(Span::styled(selection_summary, styles::muted())));
     }
-    match &app.why_this.panel {
-        WhyThisPanel::Empty => {
-            lines.push(Line::from(Span::raw("")));
-            lines.push(Line::from(Span::styled("How to Use", styles::title())));
-            lines.push(Line::from(vec![
-                Span::styled(" w ", styles::keybind()),
-                Span::styled("ask why for focus or marks", styles::muted()),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled(" v ", styles::keybind()),
-                Span::styled("mark current hunk/line", styles::muted()),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled(" V ", styles::keybind()),
-                Span::styled("clear marks in current file", styles::muted()),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled(" m ", styles::keybind()),
-                Span::styled("choose model", styles::muted()),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled(" s ", styles::keybind()),
-                Span::styled("choose attributed session", styles::muted()),
-            ]));
+    lines
+}
+
+fn explain_empty_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::raw("")),
+        Line::from(Span::styled("Explain the current change", styles::title())),
+        Line::from(vec![
+            Span::styled(" e ", styles::keybind()),
+            Span::styled("explain current focus or marks", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled(" v ", styles::keybind()),
+            Span::styled("mark current hunk or line", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled(" V ", styles::keybind()),
+            Span::styled("clear marks in current file", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled(" m ", styles::keybind()),
+            Span::styled("choose model", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled(" s ", styles::keybind()),
+            Span::styled("choose context source", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled(" h ", styles::keybind()),
+            Span::styled("open explain history", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled(" z ", styles::keybind()),
+            Span::styled("cancel current run", styles::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled(" r ", styles::keybind()),
+            Span::styled("retry current run", styles::muted()),
+        ]),
+        Line::from(Span::raw("")),
+        Line::from(Span::styled(
+            "Tip: marks are explained together; otherwise Explain uses the current focus.",
+            styles::subtle(),
+        )),
+    ]
+}
+
+fn explain_footer_lines(app: &App) -> Vec<Line<'static>> {
+    vec![Line::from(vec![
+        Span::styled("e", styles::keybind()),
+        Span::styled(" explain", styles::muted()),
+        Span::raw("  "),
+        Span::styled("h", styles::keybind()),
+        Span::styled(
+            format!(" history ({})", app.why_this.runs.len()),
+            styles::muted(),
+        ),
+        Span::raw("  "),
+        Span::styled("r", styles::keybind()),
+        Span::styled(" retry", styles::muted()),
+        Span::raw("  "),
+        Span::styled("z", styles::keybind()),
+        Span::styled(" cancel", styles::muted()),
+    ])]
+}
+
+fn explain_history_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = explain_context_lines(app);
+    lines.push(Line::from(Span::raw("")));
+
+    if app.why_this.runs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No explain runs yet.",
+            styles::title(),
+        )));
+        return lines;
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!("{} run(s) this session", app.why_this.runs.len()),
+        styles::title(),
+    )));
+    lines.extend(render_explain_history_list_lines(app));
+    lines.push(Line::from(Span::raw("")));
+    if let Some(run) = selected_history_run(app) {
+        lines.extend(render_explain_run_lines(run, &app.logo_animation));
+    }
+    lines.push(Line::from(Span::raw("")));
+    lines.push(Line::from(vec![
+        Span::styled("j/k", styles::keybind()),
+        Span::styled(" move", styles::muted()),
+        Span::raw("  "),
+        Span::styled("Enter", styles::keybind()),
+        Span::styled(" focus", styles::muted()),
+        Span::raw("  "),
+        Span::styled("r", styles::keybind()),
+        Span::styled(" retry", styles::muted()),
+        Span::raw("  "),
+        Span::styled("z", styles::keybind()),
+        Span::styled(" cancel", styles::muted()),
+        Span::raw("  "),
+        Span::styled("Del", styles::keybind()),
+        Span::styled(" clear", styles::muted()),
+    ]));
+    lines
+}
+
+fn render_explain_history_list_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    for (index, run) in app.why_this.runs.iter().enumerate() {
+        let selected = app.why_this.history_cursor == index;
+        let marker = if selected { ">" } else { " " };
+        let style = if selected {
+            Style::default()
+                .fg(styles::TEXT_PRIMARY)
+                .bg(styles::ACCENT_DIM)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(styles::TEXT_MUTED)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} #{} ", run.id), style),
+            Span::styled(
+                explain_run_status_label(&run.status),
+                explain_run_status_style(&run.status),
+            ),
+            Span::styled(format!(" {}", run.label), style),
+        ]));
+    }
+
+    lines
+}
+
+fn render_explain_run_lines(run: &ExplainRun, animation: &AnimatedTextState) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(run.label.clone(), styles::title())),
+        Line::from(Span::styled(
+            format!("status: {}", explain_run_status_label(&run.status)),
+            explain_run_status_style(&run.status),
+        )),
+        Line::from(Span::styled(
+            format!("context: {}", run.context_source_label),
+            styles::muted(),
+        )),
+        Line::from(Span::styled(
+            format!("model: {}", run.model_label),
+            styles::muted(),
+        )),
+    ];
+
+    match &run.status {
+        ExplainRunStatus::Running => {
             lines.push(Line::from(Span::raw("")));
             lines.push(Line::from(Span::styled(
-                "Tip: if marks exist, Why This explains them together; otherwise it explains current focus.",
-                styles::subtle(),
-            )));
-        }
-        WhyThisPanel::Loading { label } => {
-            lines.push(Line::from(Span::raw("")));
-            lines.push(Line::from(Span::styled(label.to_string(), styles::title())));
-            lines.push(Line::from(Span::styled(
-                loading_thinking_label(&app.logo_animation),
+                loading_thinking_label(animation),
                 styles::accent_bold(),
             )));
             lines.push(Line::from(Span::styled(
-                format!("Model: {}", why_model_display_label(app)),
-                styles::muted(),
-            )));
-            lines.push(Line::from(Span::styled(
-                "Using a fork of the selected session so the live coding thread stays clean.",
+                "Using a fork of the selected context source so the live coding thread stays clean.",
                 styles::muted(),
             )));
         }
-        WhyThisPanel::Ready { label, answer } => {
+        ExplainRunStatus::Ready => {
+            let Some(answer) = &run.result else {
+                return lines;
+            };
             lines.push(Line::from(Span::raw("")));
-            lines.push(Line::from(Span::styled(label.clone(), styles::title())));
             lines.push(Line::from(Span::styled(
                 format!("forked session: {}", answer.fork_session_id),
                 styles::subtle(),
@@ -1464,20 +1706,213 @@ fn why_panel_lines(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(Span::raw("")));
             lines.extend(render_why_answer_lines(answer));
         }
-        WhyThisPanel::Failed { label, error } => {
+        ExplainRunStatus::Failed => {
             lines.push(Line::from(Span::raw("")));
             lines.push(Line::from(Span::styled(
-                format!("Failed to explain {label}"),
+                "Couldn't explain this change.",
                 Style::default()
                     .fg(styles::DANGER)
                     .add_modifier(Modifier::BOLD),
             )));
+            if let Some(error) = &run.error {
+                lines.push(Line::from(Span::raw(error.clone())));
+            }
+        }
+        ExplainRunStatus::Cancelled => {
             lines.push(Line::from(Span::raw("")));
-            lines.push(Line::from(Span::raw(error.clone())));
+            lines.push(Line::from(Span::styled(
+                "This explain run was cancelled before completion.",
+                styles::muted(),
+            )));
         }
     }
 
     lines
+}
+
+fn next_explain_run_id(why_this: &mut WhyThisUiState) -> u64 {
+    why_this.next_run_id = why_this.next_run_id.saturating_add(1);
+    why_this.next_run_id
+}
+
+fn find_explain_run_index_by_id(why_this: &WhyThisUiState, run_id: u64) -> Option<usize> {
+    why_this.runs.iter().position(|run| run.id == run_id)
+}
+
+fn find_reusable_explain_run_index(why_this: &WhyThisUiState, cache_key: &str) -> Option<usize> {
+    why_this.runs.iter().position(|run| {
+        run.cache_key == cache_key
+            && matches!(
+                run.status,
+                ExplainRunStatus::Running | ExplainRunStatus::Ready
+            )
+    })
+}
+
+fn current_explain_run(app: &App) -> Option<&ExplainRun> {
+    let run_id = app.why_this.current_run_id?;
+    app.why_this.runs.iter().find(|run| run.id == run_id)
+}
+
+fn selected_history_run(app: &App) -> Option<&ExplainRun> {
+    app.why_this.runs.get(app.why_this.history_cursor)
+}
+
+fn move_explain_history_cursor(app: &mut App, delta: isize) {
+    if app.why_this.runs.is_empty() {
+        app.status = "No explain runs yet.".to_string();
+        return;
+    }
+
+    let len = app.why_this.runs.len() as isize;
+    let current = app.why_this.history_cursor as isize;
+    let next = (current + delta).rem_euclid(len) as usize;
+    app.why_this.history_cursor = next;
+    if let Some(run) = app.why_this.runs.get(next) {
+        app.status = format!("Selected explain run #{}.", run.id);
+    }
+}
+
+fn focus_history_run(app: &mut App) {
+    let Some(run_id) = selected_history_run(app).map(|run| run.id) else {
+        app.status = "No explain run selected.".to_string();
+        return;
+    };
+
+    app.why_this.current_run_id = Some(run_id);
+    app.overlay = Overlay::None;
+    app.status = format!("Focused explain run #{}.", run_id);
+}
+
+fn cancel_run_by_index(app: &mut App, index: usize) {
+    let Some(run) = app.why_this.runs.get_mut(index) else {
+        app.status = "Selected explain run no longer exists.".to_string();
+        return;
+    };
+
+    if !matches!(run.status, ExplainRunStatus::Running) {
+        app.status = format!("Explain run #{} is not running.", run.id);
+        return;
+    };
+
+    if let Some(handle) = run.handle.take() {
+        handle.abort();
+    }
+    run.status = ExplainRunStatus::Cancelled;
+    run.error = None;
+    app.status = format!("Cancelled explain run #{}.", run.id);
+}
+
+fn cancel_current_explain(app: &mut App) {
+    let Some(run_id) = app.why_this.current_run_id else {
+        app.status = "No current explain run.".to_string();
+        return;
+    };
+
+    if let Some(index) = find_explain_run_index_by_id(&app.why_this, run_id) {
+        cancel_run_by_index(app, index);
+    }
+}
+
+fn cancel_history_run(app: &mut App) {
+    cancel_run_by_index(app, app.why_this.history_cursor);
+}
+
+fn clear_run_by_index(app: &mut App, index: usize) {
+    let Some(run) = app.why_this.runs.get(index) else {
+        app.status = "Selected explain run no longer exists.".to_string();
+        return;
+    };
+
+    if matches!(run.status, ExplainRunStatus::Running) {
+        app.status = format!(
+            "Explain run #{} is still running. Press z to cancel it.",
+            run.id
+        );
+        return;
+    }
+
+    let removed = app.why_this.runs.remove(index);
+    if app.why_this.current_run_id == Some(removed.id) {
+        app.why_this.current_run_id = app.why_this.runs.last().map(|run| run.id);
+    }
+    if app.why_this.runs.is_empty() {
+        app.why_this.history_cursor = 0;
+        if app.overlay == Overlay::ExplainHistory {
+            app.overlay = Overlay::None;
+        }
+    } else {
+        app.why_this.history_cursor = index.min(app.why_this.runs.len().saturating_sub(1));
+    }
+    app.status = format!("Cleared explain run #{}.", removed.id);
+}
+
+fn clear_history_run(app: &mut App) {
+    clear_run_by_index(app, app.why_this.history_cursor);
+}
+
+fn open_explain_history(app: &mut App) {
+    app.overlay = Overlay::ExplainHistory;
+    app.status = "Opened explain history.".to_string();
+}
+
+async fn retry_current_explain(app: &mut App) -> Result<()> {
+    let Some(run_id) = app.why_this.current_run_id else {
+        app.status = "No current explain run.".to_string();
+        return Ok(());
+    };
+    retry_run_by_id(app, run_id).await
+}
+
+fn retry_history_run(app: &mut App) {
+    if let Some(run_id) = selected_history_run(app).map(|run| run.id) {
+        app.why_this.current_run_id = Some(run_id);
+        app.status = format!("Focused explain run #{} for retry.", run_id);
+    }
+}
+
+async fn retry_run_by_id(app: &mut App, run_id: u64) -> Result<()> {
+    let Some(index) = find_explain_run_index_by_id(&app.why_this, run_id) else {
+        app.status = "Explain run no longer exists.".to_string();
+        return Ok(());
+    };
+    let Some(run) = app.why_this.runs.get(index) else {
+        app.status = "Explain run no longer exists.".to_string();
+        return Ok(());
+    };
+    if matches!(run.status, ExplainRunStatus::Running) {
+        app.status = format!("Explain run #{} is already running.", run.id);
+        return Ok(());
+    }
+
+    request_explain_with_target(
+        app,
+        run.label.clone(),
+        run.target.clone(),
+        run.context_source_id.clone(),
+        run.context_source_label.clone(),
+        run.requested_model.clone(),
+        run.model_label.clone(),
+    )
+    .await
+}
+
+fn explain_run_status_label(status: &ExplainRunStatus) -> &'static str {
+    match status {
+        ExplainRunStatus::Running => "running",
+        ExplainRunStatus::Ready => "ready",
+        ExplainRunStatus::Failed => "failed",
+        ExplainRunStatus::Cancelled => "cancelled",
+    }
+}
+
+fn explain_run_status_style(status: &ExplainRunStatus) -> Style {
+    match status {
+        ExplainRunStatus::Running => styles::accent_bold(),
+        ExplainRunStatus::Ready => Style::default().fg(styles::SUCCESS),
+        ExplainRunStatus::Failed => Style::default().fg(styles::DANGER),
+        ExplainRunStatus::Cancelled => styles::muted(),
+    }
 }
 
 fn diff_scroll_offset(app: &App, area: Rect, diff_lines: &[Line<'_>]) -> u16 {
@@ -1624,17 +2059,17 @@ fn move_review_cursor_by_line(app: &mut App, delta: isize) {
 fn toggle_why_selection(app: &mut App) {
     if app.review.focus != ReviewFocus::Hunks {
         app.status =
-            "Open a file hunk or line first, then press v to build a grouped Why This? selection."
+            "Open a file hunk or line first, then press v to build a grouped Explain selection."
                 .to_string();
         return;
     }
 
     let Some(file) = app.review.files.get(app.review.cursor_file) else {
-        app.status = "No file is selected for Why This?.".to_string();
+        app.status = "No file is selected for Explain.".to_string();
         return;
     };
     if file.hunks.is_empty() {
-        app.status = "This file has no textual hunks to group for Why This?.".to_string();
+        app.status = "This file has no textual hunks to group for Explain.".to_string();
         return;
     }
 
@@ -1649,9 +2084,9 @@ fn toggle_why_selection(app: &mut App) {
     if app.review.cursor_line <= hunk_start {
         let selected_count = toggle_hunk_selection(&mut app.why_this.selections, &path, hunk_index);
         app.status = if selected_count == 0 {
-            format!("Cleared Why This? hunk selection for {path}.")
+            format!("Cleared Explain hunk selection for {path}.")
         } else {
-            format!("Selected {selected_count} hunk(s) in {path} for grouped Why This?.")
+            format!("Selected {selected_count} hunk(s) in {path} for grouped Explain.")
         };
         return;
     }
@@ -1660,9 +2095,9 @@ fn toggle_why_selection(app: &mut App) {
     if hunk.lines.get(line_index).is_none() {
         let selected_count = toggle_hunk_selection(&mut app.why_this.selections, &path, hunk_index);
         app.status = if selected_count == 0 {
-            format!("Cleared Why This? hunk selection for {path}.")
+            format!("Cleared Explain hunk selection for {path}.")
         } else {
-            format!("Selected {selected_count} hunk(s) in {path} for grouped Why This?.")
+            format!("Selected {selected_count} hunk(s) in {path} for grouped Explain.")
         };
         return;
     }
@@ -1676,15 +2111,15 @@ fn toggle_why_selection(app: &mut App) {
         },
     );
     app.status = if selected_count == 0 {
-        format!("Cleared Why This? line selection for {path}.")
+        format!("Cleared Explain line selection for {path}.")
     } else {
-        format!("Selected {selected_count} line(s) in {path} for grouped Why This?.")
+        format!("Selected {selected_count} line(s) in {path} for grouped Explain.")
     };
 }
 
 fn clear_why_selection_for_current_file(app: &mut App) {
     let Some(file) = app.review.files.get(app.review.cursor_file) else {
-        app.status = "No file is selected for Why This?.".to_string();
+        app.status = "No file is selected for Explain.".to_string();
         return;
     };
 
@@ -1695,12 +2130,12 @@ fn clear_why_selection_for_current_file(app: &mut App) {
         .is_some()
     {
         app.status = format!(
-            "Cleared Why This? grouped selection for {}.",
+            "Cleared Explain grouped selection for {}.",
             file.display_path()
         );
     } else {
         app.status = format!(
-            "No Why This? grouped selection set for {}.",
+            "No Explain grouped selection set for {}.",
             file.display_path()
         );
     }
@@ -1772,10 +2207,10 @@ fn current_selection_summary(app: &App) -> Option<String> {
     })
 }
 
-fn why_session_line(app: &App) -> String {
+fn explain_context_source_line(app: &App) -> String {
     app.active_session()
-        .map(|session| format!("session: {} ({})", session.title, session.id))
-        .unwrap_or_else(|| "session: none selected".to_string())
+        .map(|session| format!("context: {} ({})", session.title, session.id))
+        .unwrap_or_else(|| "context: none selected".to_string())
 }
 
 fn model_picker_cursor(choice: &WhyModelChoice, models: &[String]) -> usize {
@@ -1830,9 +2265,14 @@ fn loading_thinking_label(animation: &AnimatedTextState) -> String {
 fn render_why_answer_lines(answer: &WhyAnswer) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     lines.extend(render_why_section(
-        "Intent:",
+        "Summary:",
         styles::accent_bold(),
-        &answer.intent,
+        &answer.summary,
+    ));
+    lines.extend(render_why_section(
+        "Purpose:",
+        styles::title(),
+        &answer.purpose,
     ));
     lines.extend(render_why_section(
         "Change:",
@@ -1844,7 +2284,7 @@ fn render_why_answer_lines(answer: &WhyAnswer) -> Vec<Line<'static>> {
         Style::default()
             .fg(styles::DANGER)
             .add_modifier(Modifier::BOLD),
-        &answer.risk,
+        &answer.risk_reason,
     ));
     lines
 }
@@ -2481,15 +2921,16 @@ mod tests {
     #[test]
     fn render_why_answer_lines_styles_named_sections() {
         let lines = render_why_answer_lines(&WhyAnswer {
-            intent: "explain".to_string(),
+            summary: "explain".to_string(),
+            purpose: "make the diff understandable".to_string(),
             change: "add picker".to_string(),
             risk_level: WhyRiskLevel::Medium,
-            risk: "medium impact".to_string(),
+            risk_reason: "medium impact".to_string(),
             fork_session_id: "ses_1".to_string(),
         });
         assert!(lines.iter().any(|line| {
             line.spans.iter().any(|span| {
-                span.content.as_ref() == "Intent:" && span.style.fg == Some(styles::ACCENT_BRIGHT)
+                span.content.as_ref() == "Summary:" && span.style.fg == Some(styles::ACCENT_BRIGHT)
             })
         }));
         assert!(lines.iter().any(|line| {
@@ -2526,12 +2967,12 @@ mod tests {
     }
 
     #[test]
-    fn why_session_line_uses_selected_session_when_available() {
+    fn explain_context_source_line_uses_selected_session_when_available() {
         let mut app = sample_app(ReviewUiState {
             files: vec![sample_file()],
             ..ReviewUiState::default()
         });
-        assert_eq!(why_session_line(&app), "session: none selected");
+        assert_eq!(explain_context_source_line(&app), "context: none selected");
 
         app.session_state.sessions = vec![OpencodeSession {
             id: "ses_1".to_string(),
@@ -2541,8 +2982,8 @@ mod tests {
         }];
         app.session_state.selected = Some(0);
         assert_eq!(
-            why_session_line(&app),
-            "session: Main Session (ses_1)".to_string()
+            explain_context_source_line(&app),
+            "context: Main Session (ses_1)".to_string()
         );
     }
 
@@ -2560,10 +3001,10 @@ mod tests {
 
         clear_why_selection_for_current_file(&mut app);
         assert!(!app.why_this.selections.contains_key("src/lib.rs"));
-        assert!(app.status.contains("Cleared Why This? grouped selection"));
+        assert!(app.status.contains("Cleared Explain grouped selection"));
 
         clear_why_selection_for_current_file(&mut app);
-        assert!(app.status.contains("No Why This? grouped selection set"));
+        assert!(app.status.contains("No Explain grouped selection set"));
     }
 
     #[test]
@@ -2605,7 +3046,7 @@ mod tests {
     }
 
     #[test]
-    fn why_panel_lines_show_model_and_selection_guidance() {
+    fn explain_panel_lines_show_model_and_selection_guidance() {
         let mut app = sample_app(ReviewUiState {
             files: vec![sample_file()],
             cursor_file: 0,
@@ -2619,7 +3060,7 @@ mod tests {
             }])),
         );
 
-        let text = why_panel_lines(&app)
+        let text = explain_panel_lines(&app)
             .iter()
             .map(|line| {
                 line.spans
@@ -2631,10 +3072,123 @@ mod tests {
             .join("\n");
 
         assert!(text.contains("model:"));
-        assert!(text.contains("How to Use"));
-        assert!(text.contains("ask why for focus or marks"));
-        assert!(text.contains("mark current hunk/line"));
+        assert!(text.contains("Explain the current change"));
+        assert!(text.contains("explain current focus or marks"));
+        assert!(text.contains("mark current hunk or line"));
         assert!(text.contains("selection: 1 line(s) in this file"));
+    }
+
+    #[test]
+    fn move_explain_history_cursor_wraps_between_runs() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.why_this.runs = vec![
+            ExplainRun {
+                id: 1,
+                label: "first".to_string(),
+                target: why_target_for_file(&sample_file()),
+                context_source_id: "ses_1".to_string(),
+                context_source_label: "session".to_string(),
+                requested_model: None,
+                model_label: "Auto".to_string(),
+                cache_key: "a".to_string(),
+                status: ExplainRunStatus::Ready,
+                result: Some(WhyAnswer {
+                    summary: "a".to_string(),
+                    purpose: "b".to_string(),
+                    change: "b".to_string(),
+                    risk_level: WhyRiskLevel::Low,
+                    risk_reason: "c".to_string(),
+                    fork_session_id: "ses_1".to_string(),
+                }),
+                error: None,
+                handle: None,
+            },
+            ExplainRun {
+                id: 2,
+                label: "second".to_string(),
+                target: why_target_for_file(&sample_file()),
+                context_source_id: "ses_1".to_string(),
+                context_source_label: "session".to_string(),
+                requested_model: None,
+                model_label: "Auto".to_string(),
+                cache_key: "b".to_string(),
+                status: ExplainRunStatus::Cancelled,
+                result: None,
+                error: None,
+                handle: None,
+            },
+        ];
+        app.why_this.history_cursor = 0;
+
+        move_explain_history_cursor(&mut app, -1);
+        assert_eq!(app.why_this.history_cursor, 1);
+
+        move_explain_history_cursor(&mut app, 1);
+        assert_eq!(app.why_this.history_cursor, 0);
+    }
+
+    #[test]
+    fn cancel_current_explain_marks_running_run_cancelled() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.why_this.runs = vec![ExplainRun {
+            id: 7,
+            label: "job".to_string(),
+            target: why_target_for_file(&sample_file()),
+            context_source_id: "ses_1".to_string(),
+            context_source_label: "session".to_string(),
+            requested_model: None,
+            model_label: "Auto".to_string(),
+            cache_key: "cache".to_string(),
+            status: ExplainRunStatus::Running,
+            result: None,
+            error: None,
+            handle: None,
+        }];
+        app.why_this.current_run_id = Some(7);
+
+        cancel_current_explain(&mut app);
+
+        assert!(matches!(
+            app.why_this.runs[0].status,
+            ExplainRunStatus::Cancelled
+        ));
+        assert!(app.status.contains("Cancelled explain run #7"));
+    }
+
+    #[test]
+    fn clear_history_run_removes_finished_run() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.overlay = Overlay::ExplainHistory;
+        app.why_this.runs = vec![ExplainRun {
+            id: 8,
+            label: "job".to_string(),
+            target: why_target_for_file(&sample_file()),
+            context_source_id: "ses_1".to_string(),
+            context_source_label: "session".to_string(),
+            requested_model: None,
+            model_label: "Auto".to_string(),
+            cache_key: "cache".to_string(),
+            status: ExplainRunStatus::Failed,
+            result: None,
+            error: Some("boom".to_string()),
+            handle: None,
+        }];
+        app.why_this.history_cursor = 0;
+
+        clear_history_run(&mut app);
+
+        assert!(app.why_this.runs.is_empty());
+        assert_eq!(app.why_this.current_run_id, None);
+        assert_eq!(app.overlay, Overlay::None);
     }
 
     #[test]
@@ -2653,10 +3207,11 @@ mod tests {
     #[test]
     fn render_why_answer_lines_preserves_unlabeled_paragraphs() {
         let lines = render_why_answer_lines(&WhyAnswer {
-            intent: "General note".to_string(),
+            summary: "General note".to_string(),
+            purpose: "Explain the purpose".to_string(),
             change: "Specific delta".to_string(),
             risk_level: WhyRiskLevel::Low,
-            risk: "Limited risk".to_string(),
+            risk_reason: "Limited risk".to_string(),
             fork_session_id: "ses_1".to_string(),
         });
         let text = lines
@@ -2686,7 +3241,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_why_this_requires_attributed_session() {
+    async fn request_explain_requires_attributed_session() {
         let mut app = sample_app(ReviewUiState {
             files: vec![sample_file()],
             ..ReviewUiState::default()
@@ -2694,7 +3249,7 @@ mod tests {
         app.opencode = OpencodeService::new(".").ok();
         app.session_state.selected = None;
 
-        request_why_this(&mut app).await.unwrap();
-        assert!(app.status.contains("No opencode session is attributed"));
+        request_explain(&mut app).await.unwrap();
+        assert!(app.status.contains("No context source is attributed"));
     }
 }

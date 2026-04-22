@@ -24,10 +24,11 @@ pub struct OpencodeSession {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WhyAnswer {
-    pub intent: String,
+    pub summary: String,
+    pub purpose: String,
     pub change: String,
     pub risk_level: WhyRiskLevel,
-    pub risk: String,
+    pub risk_reason: String,
     pub fork_session_id: String,
 }
 
@@ -41,10 +42,12 @@ pub enum WhyRiskLevel {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct WhyAnswerPayload {
-    intent: String,
+    version: u8,
+    summary: String,
+    purpose: String,
     change: String,
     risk_level: WhyRiskLevel,
-    risk: String,
+    risk_reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,7 +173,7 @@ impl WhyTarget {
         let instruction = concat!(
             "You are explaining code that was produced in this exact opencode session context. ",
             "Return ONLY valid JSON with no markdown, no code fences, and no extra text. ",
-            "Schema exactly: {\"intent\":string,\"change\":string,\"risk_level\":\"low\"|\"medium\"|\"high\",\"risk\":string}. ",
+            "Schema exactly: {\"version\":1,\"summary\":string,\"purpose\":string,\"change\":string,\"risk_level\":\"low\"|\"medium\"|\"high\",\"risk_reason\":string}. ",
             "Each field must be concise plain text. Keep it specific to the selected scope. If uncertain, say so in the relevant field only."
         );
 
@@ -297,10 +300,11 @@ impl OpencodeService {
         let payload = self.wait_for_answer(&fork_session_id).await?;
 
         Ok(WhyAnswer {
-            intent: payload.intent,
+            summary: payload.summary,
+            purpose: payload.purpose,
             change: payload.change,
             risk_level: payload.risk_level,
-            risk: payload.risk,
+            risk_reason: payload.risk_reason,
             fork_session_id,
         })
     }
@@ -620,17 +624,62 @@ fn parse_candidate_answer(parts: &[&str]) -> Result<Option<WhyAnswerPayload>> {
         return Ok(None);
     }
 
+    let json_payload =
+        extract_first_json_object(&cleaned).context("failed to locate why-this JSON payload")?;
     let payload: WhyAnswerPayload =
-        serde_json::from_str(&cleaned).context("failed to parse why-this JSON payload")?;
+        serde_json::from_str(&json_payload).context("failed to parse why-this JSON payload")?;
     Ok(Some(normalize_payload(payload)))
+}
+
+fn extract_first_json_object(text: &str) -> Option<String> {
+    let mut start_index = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in text.char_indices() {
+        if let Some(start) = start_index {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match ch {
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+
+            match ch {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(text[start..=index].to_string());
+                    }
+                }
+                _ => {}
+            }
+        } else if ch == '{' {
+            start_index = Some(index);
+            depth = 1;
+        }
+    }
+
+    None
 }
 
 fn normalize_payload(payload: WhyAnswerPayload) -> WhyAnswerPayload {
     WhyAnswerPayload {
-        intent: normalize_answer_field(&payload.intent),
+        version: payload.version,
+        summary: normalize_answer_field(&payload.summary),
+        purpose: normalize_answer_field(&payload.purpose),
         change: normalize_answer_field(&payload.change),
         risk_level: payload.risk_level,
-        risk: normalize_answer_field(&payload.risk),
+        risk_reason: normalize_answer_field(&payload.risk_reason),
     }
 }
 
@@ -774,15 +823,17 @@ mod tests {
     #[test]
     fn parse_candidate_answer_parses_valid_json_payload() {
         let answer = parse_candidate_answer(&[
-            r#"{"intent":"update parser","change":"tighten output schema","risk_level":"low","risk":"small formatting drift"}"#,
+            r#"{"version":1,"summary":"update parser","purpose":"make explain output deterministic","change":"tighten output schema","risk_level":"low","risk_reason":"small formatting drift"}"#,
         ])
         .unwrap()
         .unwrap();
 
-        assert_eq!(answer.intent, "update parser");
+        assert_eq!(answer.version, 1);
+        assert_eq!(answer.summary, "update parser");
+        assert_eq!(answer.purpose, "make explain output deterministic");
         assert_eq!(answer.change, "tighten output schema");
         assert_eq!(answer.risk_level, WhyRiskLevel::Low);
-        assert_eq!(answer.risk, "small formatting drift");
+        assert_eq!(answer.risk_reason, "small formatting drift");
     }
 
     #[test]
@@ -790,15 +841,19 @@ mod tests {
         let answer = parse_candidate_answer(&[
             "You are explaining code that was produced in this exact opencode session context.\n\nScope: hunk\nPath: Cargo.lock",
             "<system-reminder>\nYour operational mode has changed from plan to build.\n</system-reminder>",
-            r#"{"intent":"add SQLite-backed session discovery","change":"add rusqlite and a Why This panel","risk_level":"medium","risk":"the parser must ignore prompt echoes"}"#,
+            r#"{"version":1,"summary":"add SQLite-backed session discovery","purpose":"let Explain reuse repo-local opencode context","change":"add rusqlite and an Explain panel","risk_level":"medium","risk_reason":"the parser must ignore prompt echoes"}"#,
         ])
         .unwrap()
         .unwrap();
 
-        assert_eq!(answer.intent, "add SQLite-backed session discovery");
-        assert_eq!(answer.change, "add rusqlite and a Why This panel");
+        assert_eq!(answer.summary, "add SQLite-backed session discovery");
+        assert_eq!(
+            answer.purpose,
+            "let Explain reuse repo-local opencode context"
+        );
+        assert_eq!(answer.change, "add rusqlite and an Explain panel");
         assert_eq!(answer.risk_level, WhyRiskLevel::Medium);
-        assert_eq!(answer.risk, "the parser must ignore prompt echoes");
+        assert_eq!(answer.risk_reason, "the parser must ignore prompt echoes");
     }
 
     #[test]
@@ -825,23 +880,55 @@ mod tests {
     fn parse_candidate_answer_normalizes_multiline_fields() {
         let payload = [
             "You are explaining code that was produced in this exact opencode session context. Scope: file Path: README.md Diff: ...",
-            r#"{"intent":"document new why-this controls\nwith deterministic output","change":"replace Space with v/V\nand add model picker details","risk_level":"medium","risk":"users may still use old keybinds initially\nuntil they relearn the flow"}"#,
+            r#"{"version":1,"summary":"document new explain controls\nwith deterministic output","purpose":"make explain easier to understand","change":"replace Space with v/V\nand add model picker details","risk_level":"medium","risk_reason":"users may still use old keybinds initially\nuntil they relearn the flow"}"#,
             "<system-reminder>internal mode switch</system-reminder>",
         ];
 
         let answer = parse_candidate_answer(&payload).unwrap().unwrap();
         assert_eq!(
-            answer.intent,
-            "document new why-this controls\nwith deterministic output"
+            answer.summary,
+            "document new explain controls\nwith deterministic output"
         );
+        assert_eq!(answer.purpose, "make explain easier to understand");
         assert_eq!(
             answer.change,
             "replace Space with v/V\nand add model picker details"
         );
         assert_eq!(answer.risk_level, WhyRiskLevel::Medium);
         assert_eq!(
-            answer.risk,
+            answer.risk_reason,
             "users may still use old keybinds initially\nuntil they relearn the flow"
+        );
+    }
+
+    #[test]
+    fn parse_candidate_answer_extracts_json_from_noisy_wrapper_text() {
+        let answer = parse_candidate_answer(&[
+            r#"Here is the explanation you asked for:
+{"version":1,"summary":"explain selection","purpose":"clarify grouped edits","change":"summarize grouped edits","risk_level":"low","risk_reason":"minor chance of over-summary"}
+Thanks!"#,
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(answer.summary, "explain selection");
+        assert_eq!(answer.purpose, "clarify grouped edits");
+        assert_eq!(answer.change, "summarize grouped edits");
+        assert_eq!(answer.risk_level, WhyRiskLevel::Low);
+        assert_eq!(answer.risk_reason, "minor chance of over-summary");
+    }
+
+    #[test]
+    fn extract_first_json_object_handles_braces_inside_strings() {
+        let payload = extract_first_json_object(
+            "preface {\"version\":1,\"summary\":\"explain {brace}\",\"purpose\":\"keep explain stable\",\"change\":\"keep parser stable\",\"risk_level\":\"medium\",\"risk_reason\":\"parsing can fail if braces confuse extraction\"} trailing",
+        );
+
+        assert_eq!(
+            payload,
+            Some(
+                "{\"version\":1,\"summary\":\"explain {brace}\",\"purpose\":\"keep explain stable\",\"change\":\"keep parser stable\",\"risk_level\":\"medium\",\"risk_reason\":\"parsing can fail if braces confuse extraction\"}".to_string()
+            )
         );
     }
 
@@ -880,15 +967,16 @@ mod tests {
             "ses_1",
             "msg_assistant",
             2,
-            json!({ "type": "text", "text": r#"{"intent":"explain change","change":"summarize delta","risk_level":"low","risk":"minimal regression risk"}"# }),
+            json!({ "type": "text", "text": r#"{"version":1,"summary":"explain change","purpose":"clarify the current delta","change":"summarize delta","risk_level":"low","risk_reason":"minimal regression risk"}"# }),
         );
 
         let service = OpencodeService { repo_path, db_path };
         let answer = service.latest_assistant_text("ses_1").unwrap();
-        assert_eq!(answer.intent, "explain change");
+        assert_eq!(answer.summary, "explain change");
+        assert_eq!(answer.purpose, "clarify the current delta");
         assert_eq!(answer.change, "summarize delta");
         assert_eq!(answer.risk_level, WhyRiskLevel::Low);
-        assert_eq!(answer.risk, "minimal regression risk");
+        assert_eq!(answer.risk_reason, "minimal regression risk");
     }
 
     #[test]
@@ -912,7 +1000,7 @@ mod tests {
             "ses_1",
             "msg_answer",
             1,
-            json!({ "type": "text", "text": r#"{"intent":"useful answer","change":"explain current diff","risk_level":"low","risk":"small chance of over-summary"}"# }),
+            json!({ "type": "text", "text": r#"{"version":1,"summary":"useful answer","purpose":"clarify the current diff","change":"explain current diff","risk_level":"low","risk_reason":"small chance of over-summary"}"# }),
         );
         insert_message(
             &connection,
@@ -934,7 +1022,7 @@ mod tests {
 
         let service = OpencodeService { repo_path, db_path };
         let answer = service.latest_assistant_text("ses_1").unwrap();
-        assert_eq!(answer.intent, "useful answer");
+        assert_eq!(answer.summary, "useful answer");
     }
 
     #[test]

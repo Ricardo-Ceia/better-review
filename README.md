@@ -56,7 +56,7 @@ Coding agents accelerate implementation, but they also make it easy to skip inte
 - **Non-destructive reject semantics**: reject controls commit eligibility rather than nuking your worktree
 - **Pure review workflow**: run your coding agent however you like, then use `better-review` to inspect and gate the result
 - **Fullscreen terminal UX**: home screen, review panes, and commit modal
-- **Why This? with session context**: ask opencode why a selected file, hunk, or line exists using a fork of the attributed session
+- **Explain with session context**: explain a selected file, hunk, line, or marked group using a fork of the attributed context source
 - **Terminal safety guardrails**: alternate screen and scrollback purge during app lifecycle
 
 ## Installation
@@ -162,11 +162,14 @@ cargo run
 | `y` | Accept file or hunk |
 | `x` | Reject file or hunk |
 | `u` | Move file back to unreviewed |
-| `v` | Toggle grouped `Why This?` selection on the current hunk header or diff line (within the current file) |
-| `V` | Clear grouped `Why This?` selection for the current file |
-| `m` | Choose model for `Why This?` (or keep Auto from attributed session) |
-| `w` | Ask `Why This?` for the selected file/hunk/line, or for grouped selected hunks/lines in the current file |
-| `s` | Change the attributed opencode session for `Why This?` |
+| `v` | Toggle grouped `Explain` selection on the current hunk header or diff line (within the current file) |
+| `V` | Clear grouped `Explain` selection for the current file |
+| `m` | Choose model for `Explain` (or keep Auto from the attributed context source) |
+| `e` | Explain the selected file, hunk, line, or grouped marked selection in the current file |
+| `h` | Open Explain history for this better-review session |
+| `r` | Retry the current explanation |
+| `z` | Cancel the current explanation if it is still running |
+| `s` | Change the attributed opencode context source for `Explain` |
 | `c` | Open commit prompt |
 | `Ctrl+C` | Quit |
 
@@ -242,16 +245,18 @@ Current limitations to keep in mind:
 - sparse checkouts and unusual index/worktree setups are not explicitly supported yet
 - binary, rename, and copy diffs are recognized, but the UI treatment is still basic
 
-### How does `Why This?` work?
+### How does `Explain` work?
 
 - `better-review` attributes the most recently updated local `opencode` session for the current repository by default
-- Press `s` if you want to switch to a different local session for this repo
-- `Why This?` shows the active model in the side panel; by default it uses `Auto`, which resolves to the attributed session model when available
+- Press `s` if you want to switch to a different local context source for this repo
+- `Explain` shows the active model in the side panel; by default it uses `Auto`, which resolves to the attributed session model when available
 - Press `m` to choose a specific model override for this run
 - Model picker opens immediately and refreshes available models in the background for smoother UX
-- In hunk view, press `v` on hunk headers or diff lines to build a grouped `Why This?` selection for the current file
+- In hunk view, press `v` on hunk headers or diff lines to build a grouped `Explain` selection for the current file
 - Press `V` to clear grouped selection for the current file
-- Press `w` to ask why the current file, hunk, or line exists, or to explain the grouped selection in the current file
+- Press `e` to explain the current file, hunk, or line, or the grouped selection in the current file
+- Press `h` to inspect session-local Explain history and refocus or clear older runs
+- Output is rendered from a fixed versioned JSON schema so the UI order stays deterministic
 - The explanation is requested through `opencode run --session <id> --fork` (and `--model` when overridden), so it uses the same session context without polluting the active coding thread
 
 ### Why not just `git add -p`?
