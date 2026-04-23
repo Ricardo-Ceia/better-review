@@ -314,6 +314,10 @@ const BRAND_ICON: &str = "⌕";
 const BRAND_ICON_ALT: &str = "✓";
 const BRAND_WORDMARK: &str = "better-review";
 const MODEL_CACHE_TTL: Duration = Duration::from_secs(180);
+const HOME_CASCADE_GLYPHS: &[char] = &[
+    '0', '1', '[', ']', '{', '}', '(', ')', '/', '\\', '|', '+', '-', '*', '=', ':', '.', '<', '>',
+];
+
 fn brand_lockup_width() -> u16 {
     BRAND_ICON.chars().count() as u16 + 2 + BRAND_WORDMARK.chars().count() as u16
 }
@@ -1160,20 +1164,23 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     );
 
     let inner = area.inner(ratatui::layout::Margin {
-        horizontal: 4,
-        vertical: 2,
+        horizontal: 2,
+        vertical: 1,
     });
+    let card = home_card_rect(inner);
+    draw_home_backdrop(frame, inner, card, usize::from(app.logo_animation.frame));
+
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(styles::BORDER_MUTED))
             .style(Style::default().bg(styles::SURFACE)),
-        inner,
+        card,
     );
 
-    let content = inner.inner(ratatui::layout::Margin {
-        horizontal: 4,
-        vertical: 2,
+    let content = card.inner(ratatui::layout::Margin {
+        horizontal: 3,
+        vertical: 1,
     });
     let sections = Layout::default()
         .direction(Direction::Vertical)
@@ -1258,6 +1265,120 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .style(styles::soft_accent()),
         sections[5],
     );
+}
+
+fn home_card_rect(area: Rect) -> Rect {
+    let width = ((u32::from(area.width) * 72) / 100)
+        .clamp(48, 84)
+        .min(u32::from(area.width)) as u16;
+    let height = ((u32::from(area.height) * 52) / 100)
+        .clamp(12, 18)
+        .min(u32::from(area.height)) as u16;
+
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn draw_home_backdrop(frame: &mut ratatui::Frame, area: Rect, card: Rect, animation_frame: usize) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let exclusion = expand_rect_within_area(card, area, 1, 1);
+    let buffer = frame.buffer_mut();
+
+    for local_x in 0..area.width {
+        if !home_cascade_column_is_active(local_x) {
+            continue;
+        }
+
+        let trail_len = 5 + i32::from(local_x % 7);
+        let gap = 3 + i32::from(local_x % 5);
+        let speed = 6 + (animation_frame + usize::from(local_x)) % 5;
+        let period = i32::from(area.height) + trail_len + gap;
+        let phase = ((animation_frame / speed) as i32 + i32::from(local_x) * 3) % period;
+        let head = phase - trail_len;
+        let x = area.x + local_x;
+
+        for distance in 0..trail_len {
+            let local_y = head - distance;
+            if local_y < 0 || local_y >= i32::from(area.height) {
+                continue;
+            }
+
+            let y = area.y + local_y as u16;
+            if rect_contains(exclusion, x, y) {
+                continue;
+            }
+
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_char(home_cascade_glyph(local_x, local_y as u16, animation_frame))
+                    .set_style(home_cascade_style(distance as u16, trail_len as u16));
+            }
+        }
+    }
+}
+
+fn home_cascade_column_is_active(local_x: u16) -> bool {
+    local_x % 2 == 0 || local_x % 7 == 0
+}
+
+fn home_cascade_glyph(local_x: u16, local_y: u16, animation_frame: usize) -> char {
+    let index = (usize::from(local_x) * 17 + usize::from(local_y) * 11 + animation_frame / 4)
+        % HOME_CASCADE_GLYPHS.len();
+    HOME_CASCADE_GLYPHS[index]
+}
+
+fn home_cascade_style(distance: u16, trail_len: u16) -> Style {
+    let base = Style::default().bg(styles::BASE_BG);
+    let distance = u32::from(distance);
+    let trail_len = u32::from(trail_len.max(1));
+
+    if distance == 0 {
+        return base.fg(styles::ACCENT_BRIGHT).add_modifier(Modifier::BOLD);
+    }
+
+    if distance * 3 <= trail_len {
+        return base.fg(styles::ACCENT);
+    }
+
+    if distance * 3 <= trail_len * 2 {
+        return base.fg(styles::ACCENT_DIM);
+    }
+
+    base.fg(styles::TEXT_SUBTLE)
+}
+
+fn expand_rect_within_area(rect: Rect, area: Rect, horizontal: u16, vertical: u16) -> Rect {
+    let left = rect.x.saturating_sub(horizontal).max(area.x);
+    let top = rect.y.saturating_sub(vertical).max(area.y);
+    let right = rect
+        .x
+        .saturating_add(rect.width)
+        .saturating_add(horizontal)
+        .min(area.x.saturating_add(area.width));
+    let bottom = rect
+        .y
+        .saturating_add(rect.height)
+        .saturating_add(vertical)
+        .min(area.y.saturating_add(area.height));
+
+    Rect::new(
+        left,
+        top,
+        right.saturating_sub(left),
+        bottom.saturating_sub(top),
+    )
+}
+
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    let right = rect.x.saturating_add(rect.width);
+    let bottom = rect.y.saturating_add(rect.height);
+    x >= rect.x && x < right && y >= rect.y && y < bottom
 }
 
 fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -3041,6 +3162,41 @@ mod tests {
         assert_eq!(rect.height, 20);
         assert_eq!(rect.x, 25);
         assert_eq!(rect.y, 15);
+
+        let home_card = home_card_rect(Rect::new(2, 1, 96, 30));
+        assert_eq!(home_card.width, 69);
+        assert_eq!(home_card.height, 15);
+        assert_eq!(home_card.x, 15);
+        assert_eq!(home_card.y, 8);
+    }
+
+    #[test]
+    fn home_cascade_helpers_are_stable() {
+        assert!(home_cascade_column_is_active(0));
+        assert!(!home_cascade_column_is_active(1));
+
+        let glyph = home_cascade_glyph(4, 7, 12);
+        assert!(HOME_CASCADE_GLYPHS.contains(&glyph));
+
+        let head = home_cascade_style(0, 7);
+        assert_eq!(head.fg, Some(styles::ACCENT_BRIGHT));
+        assert!(head.add_modifier.contains(Modifier::BOLD));
+
+        let tail = home_cascade_style(6, 7);
+        assert_eq!(tail.fg, Some(styles::TEXT_SUBTLE));
+        assert_eq!(tail.bg, Some(styles::BASE_BG));
+    }
+
+    #[test]
+    fn rect_helpers_expand_and_clip_to_area() {
+        let area = Rect::new(10, 5, 30, 12);
+        let rect = Rect::new(12, 7, 8, 4);
+        let expanded = expand_rect_within_area(rect, area, 2, 1);
+
+        assert_eq!(expanded, Rect::new(10, 6, 12, 6));
+        assert!(rect_contains(expanded, 10, 6));
+        assert!(rect_contains(expanded, 21, 11));
+        assert!(!rect_contains(expanded, 22, 11));
     }
 
     #[test]
