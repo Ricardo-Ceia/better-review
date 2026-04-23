@@ -12,6 +12,7 @@ const SETTINGS_DIR_NAME: &str = "better-review";
 pub struct AppSettings {
     pub version: u8,
     pub explain: ExplainSettings,
+    pub keybindings: KeybindingsSettings,
 }
 
 impl Default for AppSettings {
@@ -19,6 +20,7 @@ impl Default for AppSettings {
         Self {
             version: 1,
             explain: ExplainSettings::default(),
+            keybindings: KeybindingsSettings::default(),
         }
     }
 }
@@ -27,6 +29,46 @@ impl Default for AppSettings {
 #[serde(default)]
 pub struct ExplainSettings {
     pub default_model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeybindingsSettings {
+    pub refresh: String,
+    pub commit: String,
+    pub settings: String,
+    pub accept: String,
+    pub reject: String,
+    pub unreview: String,
+    pub explain: String,
+    pub explain_context: String,
+    pub explain_model: String,
+    pub explain_history: String,
+    pub explain_retry: String,
+    pub explain_cancel: String,
+    pub move_down: String,
+    pub move_up: String,
+}
+
+impl Default for KeybindingsSettings {
+    fn default() -> Self {
+        Self {
+            refresh: "r".to_string(),
+            commit: "c".to_string(),
+            settings: "s".to_string(),
+            accept: "y".to_string(),
+            reject: "x".to_string(),
+            unreview: "u".to_string(),
+            explain: "e".to_string(),
+            explain_context: "o".to_string(),
+            explain_model: "m".to_string(),
+            explain_history: "h".to_string(),
+            explain_retry: "t".to_string(),
+            explain_cancel: "z".to_string(),
+            move_down: "j".to_string(),
+            move_up: "k".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +151,7 @@ mod tests {
             explain: ExplainSettings {
                 default_model: Some("openai/gpt-5.4".to_string()),
             },
+            keybindings: KeybindingsSettings::default(),
         };
 
         store.save(&settings).unwrap();
@@ -147,7 +190,30 @@ mod tests {
                 explain: ExplainSettings {
                     default_model: Some("openai/gpt-5.4".to_string()),
                 },
+                keybindings: KeybindingsSettings::default(),
             }
         );
+    }
+
+    #[test]
+    fn load_fills_missing_keybindings_with_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.json");
+        let store = SettingsStore::from_path(path.clone());
+        fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "explain": {
+    "default_model": "openai/gpt-5.4"
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.keybindings.refresh, "r");
+        assert_eq!(loaded.keybindings.explain_context, "o");
     }
 }

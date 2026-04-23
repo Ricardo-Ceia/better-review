@@ -28,7 +28,7 @@ use crate::services::opencode::{
     OpencodeService, OpencodeSession, WhyAnswer, WhyRiskLevel, WhyTarget, why_target_for_file,
     why_target_for_hunk,
 };
-use crate::settings::{AppSettings, SettingsStore};
+use crate::settings::{AppSettings, KeybindingsSettings, SettingsStore};
 use crate::ui::styles;
 
 pub async fn run() -> Result<()> {
@@ -63,6 +63,8 @@ struct App {
     settings: AppSettings,
     settings_store: SettingsStore,
     settings_cursor: usize,
+    keybinding_cursor: usize,
+    keybinding_capture: Option<KeybindingCommand>,
     saved_model_cursor: usize,
     session_state: SessionUiState,
     why_this: WhyThisUiState,
@@ -83,6 +85,7 @@ enum Overlay {
     CommitPrompt,
     Settings,
     SettingsModelPicker,
+    KeybindingPicker,
     ExplainMenu,
     SessionPicker,
     ModelPicker,
@@ -204,6 +207,8 @@ impl App {
             settings,
             settings_store,
             settings_cursor: 0,
+            keybinding_cursor: 0,
+            keybinding_capture: None,
             saved_model_cursor: 0,
             session_state: SessionUiState::default(),
             why_this: WhyThisUiState::default(),
@@ -315,11 +320,54 @@ enum HomeState {
     Busy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsRow {
+    DefaultExplainModel,
+    Keybindings,
+}
+
+const SETTINGS_ROWS: &[SettingsRow] = &[SettingsRow::DefaultExplainModel, SettingsRow::Keybindings];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeybindingCommand {
+    Refresh,
+    Commit,
+    Settings,
+    Accept,
+    Reject,
+    Unreview,
+    Explain,
+    ExplainContext,
+    ExplainModel,
+    ExplainHistory,
+    ExplainRetry,
+    ExplainCancel,
+    MoveDown,
+    MoveUp,
+}
+
+const KEYBINDING_COMMANDS: &[KeybindingCommand] = &[
+    KeybindingCommand::Refresh,
+    KeybindingCommand::Commit,
+    KeybindingCommand::Settings,
+    KeybindingCommand::Accept,
+    KeybindingCommand::Reject,
+    KeybindingCommand::Unreview,
+    KeybindingCommand::Explain,
+    KeybindingCommand::ExplainContext,
+    KeybindingCommand::ExplainModel,
+    KeybindingCommand::ExplainHistory,
+    KeybindingCommand::ExplainRetry,
+    KeybindingCommand::ExplainCancel,
+    KeybindingCommand::MoveDown,
+    KeybindingCommand::MoveUp,
+];
+
 struct HomeContent {
     title: &'static str,
     detail: &'static str,
     status: Option<String>,
-    key_hints: Vec<(&'static str, &'static str)>,
+    key_hints: Vec<(String, &'static str)>,
 }
 
 const BRAND_ICON: &str = "⌕";
@@ -476,6 +524,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                             continue;
                         }
 
+                        let retry_key = key_status_label(&app, KeybindingCommand::ExplainRetry);
                         if let Some(run) = app.why_this.runs.get_mut(index) {
                             run.handle = None;
                             match result {
@@ -487,8 +536,10 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                                     run.error = None;
                                 }
                                 Err(error) => {
-                                    app.status =
-                                        format!("Explain failed: {error}. Press t to retry.");
+                                    app.status = format!(
+                                        "Explain failed: {error}. Press {} to retry.",
+                                        retry_key
+                                    );
                                     run.status = ExplainRunStatus::Failed;
                                     run.error = Some(error);
                                     run.result = None;
@@ -561,6 +612,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                 },
                 Overlay::Settings => handle_settings_key(&mut app, key),
                 Overlay::SettingsModelPicker => handle_saved_model_picker_key(&mut app, key),
+                Overlay::KeybindingPicker => handle_keybinding_picker_key(&mut app, key),
                 Overlay::ExplainMenu => handle_explain_menu_key(&mut app, key).await?,
                 Overlay::SessionPicker => handle_session_picker_key(&mut app, key),
                 Overlay::ModelPicker => handle_model_picker_key(&mut app, key),
@@ -568,9 +620,10 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                 Overlay::None => {
                     if key.code == KeyCode::Enter && app.screen == Screen::Home {
                         if app.review.files.is_empty() {
-                            app.status =
-                                "No reviewable changes yet. Run your agent, then press r to refresh."
-                                    .to_string();
+                            app.status = format!(
+                                "No reviewable changes yet. Run your agent, then press {} to refresh.",
+                                key_status_label(&app, KeybindingCommand::Refresh)
+                            );
                         } else {
                             app.screen = Screen::Review;
                             app.status = "Review workspace ready.".to_string();
@@ -578,12 +631,12 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         continue;
                     }
 
-                    if key.code == KeyCode::Char('r') {
+                    if key_matches(&app, key, KeybindingCommand::Refresh) {
                         refresh_review_files_for_user(&mut app).await?;
                         continue;
                     }
 
-                    if key.code == KeyCode::Char('c') {
+                    if key_matches(&app, key, KeybindingCommand::Commit) {
                         if app.review.files.is_empty() {
                             app.status =
                                 "Cannot commit yet because there are no reviewable changes in this repository."
@@ -597,7 +650,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         continue;
                     }
 
-                    if key.code == KeyCode::Char('s') {
+                    if key_matches(&app, key, KeybindingCommand::Settings) {
                         open_settings(&mut app);
                         continue;
                     }
@@ -641,7 +694,13 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 app.status = "Back on the better-review home screen.".to_string();
             }
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up if app.review.focus == ReviewFocus::Files => {
+            app.review.cursor_file = app.review.cursor_file.saturating_sub(1);
+            app.review.cursor_hunk = 0;
+            app.review.cursor_line = 0;
+        }
+        KeyCode::Up => move_review_cursor_by_line(app, -1),
+        _ if key_matches(app, key, KeybindingCommand::MoveUp) => {
             if app.review.focus == ReviewFocus::Files {
                 app.review.cursor_file = app.review.cursor_file.saturating_sub(1);
                 app.review.cursor_hunk = 0;
@@ -650,7 +709,15 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 move_review_cursor_by_line(app, -1);
             }
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down if app.review.focus == ReviewFocus::Files => {
+            if app.review.cursor_file + 1 < app.review.files.len() {
+                app.review.cursor_file += 1;
+                app.review.cursor_hunk = 0;
+                app.review.cursor_line = 0;
+            }
+        }
+        KeyCode::Down => move_review_cursor_by_line(app, 1),
+        _ if key_matches(app, key, KeybindingCommand::MoveDown) => {
             if app.review.focus == ReviewFocus::Files {
                 if app.review.cursor_file + 1 < app.review.files.len() {
                     app.review.cursor_file += 1;
@@ -669,7 +736,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 sync_cursor_line_to_hunk(&mut app.review);
             }
         }
-        KeyCode::Char('y') => {
+        _ if key_matches(app, key, KeybindingCommand::Accept) => {
             if app.review.focus == ReviewFocus::Files {
                 if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
                     match app.git.accept_file(file).await {
@@ -706,7 +773,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 });
             }
         }
-        KeyCode::Char('x') => {
+        _ if key_matches(app, key, KeybindingCommand::Reject) => {
             if app.review.focus == ReviewFocus::Files {
                 if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
                     let result = app.git.reject_file_in_place(file).await;
@@ -745,7 +812,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 });
             }
         }
-        KeyCode::Char('u') => {
+        _ if key_matches(app, key, KeybindingCommand::Unreview) => {
             if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
                 let result = app.git.unstage_file_in_place(file).await;
 
@@ -755,15 +822,17 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 }
             }
         }
-        KeyCode::Char('s') => open_settings(app),
-        KeyCode::Char('e') => open_explain_menu(app),
-        KeyCode::Char('h') => {
+        _ if key_matches(app, key, KeybindingCommand::Settings) => open_settings(app),
+        _ if key_matches(app, key, KeybindingCommand::Explain) => open_explain_menu(app),
+        _ if key_matches(app, key, KeybindingCommand::ExplainHistory) => {
             app.why_this.return_to_menu = false;
             open_explain_history(app)
         }
-        KeyCode::Char('t') => retry_current_explain(app).await?,
-        KeyCode::Char('z') => cancel_current_explain(app),
-        KeyCode::Char('m') => {
+        _ if key_matches(app, key, KeybindingCommand::ExplainRetry) => {
+            retry_current_explain(app).await?
+        }
+        _ if key_matches(app, key, KeybindingCommand::ExplainCancel) => cancel_current_explain(app),
+        _ if key_matches(app, key, KeybindingCommand::ExplainModel) => {
             app.why_this.return_to_menu = false;
             open_model_picker(app).await
         }
@@ -786,9 +855,10 @@ async fn handle_explain_menu_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 return Ok(());
             }
             if app.active_session().is_none() {
-                app.status =
-                    "No context source is linked to this repository. Press o to choose one."
-                        .to_string();
+                app.status = format!(
+                    "No context source is linked to this repository. Press {} to choose one.",
+                    key_status_label(app, KeybindingCommand::ExplainContext)
+                );
                 return Ok(());
             }
             if current_why_target(&app.review).is_none() {
@@ -800,20 +870,22 @@ async fn handle_explain_menu_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.why_this.return_to_menu = false;
             request_explain(app).await?;
         }
-        KeyCode::Char('o') => {
+        _ if key_matches(app, key, KeybindingCommand::ExplainContext) => {
             app.why_this.return_to_menu = true;
             open_session_picker(app)
         }
-        KeyCode::Char('m') => {
+        _ if key_matches(app, key, KeybindingCommand::ExplainModel) => {
             app.why_this.return_to_menu = true;
             open_model_picker(app).await
         }
-        KeyCode::Char('h') => {
+        _ if key_matches(app, key, KeybindingCommand::ExplainHistory) => {
             app.why_this.return_to_menu = true;
             open_explain_history(app)
         }
-        KeyCode::Char('t') => retry_current_explain(app).await?,
-        KeyCode::Char('z') => cancel_current_explain(app),
+        _ if key_matches(app, key, KeybindingCommand::ExplainRetry) => {
+            retry_current_explain(app).await?
+        }
+        _ if key_matches(app, key, KeybindingCommand::ExplainCancel) => cancel_current_explain(app),
         _ => {}
     }
 
@@ -825,11 +897,17 @@ fn handle_session_picker_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc => {
             close_explain_submenu(app, "Session picker closed.");
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             app.session_state.cursor = app.session_state.cursor.saturating_sub(1);
         }
-        KeyCode::Down | KeyCode::Char('j')
-            if app.session_state.cursor + 1 < app.session_state.sessions.len() =>
+        _ if key_matches(app, key, KeybindingCommand::MoveUp) => {
+            app.session_state.cursor = app.session_state.cursor.saturating_sub(1);
+        }
+        KeyCode::Down if app.session_state.cursor + 1 < app.session_state.sessions.len() => {
+            app.session_state.cursor += 1;
+        }
+        _ if key_matches(app, key, KeybindingCommand::MoveDown)
+            && app.session_state.cursor + 1 < app.session_state.sessions.len() =>
         {
             app.session_state.cursor += 1;
         }
@@ -850,11 +928,17 @@ fn handle_explain_history_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc => {
             close_explain_submenu(app, "Closed Explain history.");
         }
-        KeyCode::Up | KeyCode::Char('k') => move_explain_history_cursor(app, -1),
-        KeyCode::Down | KeyCode::Char('j') => move_explain_history_cursor(app, 1),
+        KeyCode::Up => move_explain_history_cursor(app, -1),
+        _ if key_matches(app, key, KeybindingCommand::MoveUp) => {
+            move_explain_history_cursor(app, -1)
+        }
+        KeyCode::Down => move_explain_history_cursor(app, 1),
+        _ if key_matches(app, key, KeybindingCommand::MoveDown) => {
+            move_explain_history_cursor(app, 1)
+        }
         KeyCode::Enter => focus_history_run(app),
-        KeyCode::Char('t') => retry_history_run(app),
-        KeyCode::Char('z') => cancel_history_run(app),
+        _ if key_matches(app, key, KeybindingCommand::ExplainRetry) => retry_history_run(app),
+        _ if key_matches(app, key, KeybindingCommand::ExplainCancel) => cancel_history_run(app),
         KeyCode::Backspace | KeyCode::Delete => clear_history_run(app),
         _ => {}
     }
@@ -866,10 +950,18 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc => {
             close_explain_submenu(app, "Closed the Explain model picker.");
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             app.why_this.model.cursor = app.why_this.model.cursor.saturating_sub(1);
         }
-        KeyCode::Down | KeyCode::Char('j') if app.why_this.model.cursor < max_index => {
+        _ if key_matches(app, key, KeybindingCommand::MoveUp) => {
+            app.why_this.model.cursor = app.why_this.model.cursor.saturating_sub(1);
+        }
+        KeyCode::Down if app.why_this.model.cursor < max_index => {
+            app.why_this.model.cursor += 1;
+        }
+        _ if key_matches(app, key, KeybindingCommand::MoveDown)
+            && app.why_this.model.cursor < max_index =>
+        {
             app.why_this.model.cursor += 1;
         }
         KeyCode::Enter => {
@@ -903,10 +995,18 @@ fn handle_saved_model_picker_key(app: &mut App, key: KeyEvent) {
             app.overlay = Overlay::Settings;
             app.status = "Back to settings.".to_string();
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             app.saved_model_cursor = app.saved_model_cursor.saturating_sub(1);
         }
-        KeyCode::Down | KeyCode::Char('j') if app.saved_model_cursor < max_index => {
+        _ if key_matches(app, key, KeybindingCommand::MoveUp) => {
+            app.saved_model_cursor = app.saved_model_cursor.saturating_sub(1);
+        }
+        KeyCode::Down if app.saved_model_cursor < max_index => {
+            app.saved_model_cursor += 1;
+        }
+        _ if key_matches(app, key, KeybindingCommand::MoveDown)
+            && app.saved_model_cursor < max_index =>
+        {
             app.saved_model_cursor += 1;
         }
         KeyCode::Enter => {
@@ -940,17 +1040,102 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
                 app.settings_store.path().display()
             );
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             app.settings_cursor = app.settings_cursor.saturating_sub(1);
         }
-        KeyCode::Down | KeyCode::Char('j') if app.settings_cursor + 1 < settings_row_count() => {
+        _ if key_matches(app, key, KeybindingCommand::MoveUp) => {
+            app.settings_cursor = app.settings_cursor.saturating_sub(1);
+        }
+        KeyCode::Down if app.settings_cursor + 1 < settings_row_count() => {
             app.settings_cursor += 1;
         }
-        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-            open_saved_model_picker(app);
+        _ if key_matches(app, key, KeybindingCommand::MoveDown)
+            && app.settings_cursor + 1 < settings_row_count() =>
+        {
+            app.settings_cursor += 1;
+        }
+        KeyCode::Enter | KeyCode::Right => {
+            open_selected_settings_row(app);
         }
         _ => {}
     }
+}
+
+fn handle_keybinding_picker_key(app: &mut App, key: KeyEvent) {
+    if let Some(command) = app.keybinding_capture {
+        match key.code {
+            KeyCode::Esc => {
+                app.keybinding_capture = None;
+                app.status = "Keybinding unchanged.".to_string();
+            }
+            KeyCode::Char(ch) if is_valid_keybinding_char(ch) => {
+                if let Some(conflict) = keybinding_conflict(&app.settings.keybindings, command, ch)
+                {
+                    app.status = format!(
+                        "Key '{}' is already assigned to {}.",
+                        ch,
+                        command_label(conflict)
+                    );
+                } else {
+                    set_command_binding(&mut app.settings.keybindings, command, ch);
+                    save_settings(app);
+                    app.keybinding_capture = None;
+                    app.status = format!("{} set to '{}'.", command_label(command), ch);
+                }
+            }
+            KeyCode::Char(_) => {
+                app.status = "Use a lowercase letter key.".to_string();
+            }
+            _ => {
+                app.status = "Use a lowercase letter key, or Esc to cancel.".to_string();
+            }
+        }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = Overlay::Settings;
+            app.status = "Back to settings.".to_string();
+        }
+        KeyCode::Up => {
+            app.keybinding_cursor = app.keybinding_cursor.saturating_sub(1);
+        }
+        _ if key_matches(app, key, KeybindingCommand::MoveUp) => {
+            app.keybinding_cursor = app.keybinding_cursor.saturating_sub(1);
+        }
+        KeyCode::Down if app.keybinding_cursor + 1 < KEYBINDING_COMMANDS.len() => {
+            app.keybinding_cursor += 1;
+        }
+        _ if key_matches(app, key, KeybindingCommand::MoveDown)
+            && app.keybinding_cursor + 1 < KEYBINDING_COMMANDS.len() =>
+        {
+            app.keybinding_cursor += 1;
+        }
+        KeyCode::Enter | KeyCode::Right => {
+            let command = selected_keybinding_command(app);
+            app.keybinding_capture = Some(command);
+            app.status = format!(
+                "Press a lowercase letter for {}, or Esc to cancel.",
+                command_label(command)
+            );
+        }
+        _ => {}
+    }
+}
+
+fn open_selected_settings_row(app: &mut App) {
+    match SETTINGS_ROWS[app.settings_cursor.min(SETTINGS_ROWS.len() - 1)] {
+        SettingsRow::DefaultExplainModel => open_saved_model_picker(app),
+        SettingsRow::Keybindings => open_keybinding_picker(app),
+    }
+}
+
+fn open_keybinding_picker(app: &mut App) {
+    app.overlay = Overlay::KeybindingPicker;
+    app.keybinding_cursor = 0;
+    app.keybinding_capture = None;
+    app.status = "Choose a command to rebind.".to_string();
 }
 
 async fn open_model_picker(app: &mut App) {
@@ -1037,8 +1222,10 @@ async fn request_explain(app: &mut App) -> Result<()> {
         return Ok(());
     };
     let Some(session) = app.active_session().cloned() else {
-        app.status =
-            "No context source is linked to this repository. Press o to choose one.".to_string();
+        app.status = format!(
+            "No context source is linked to this repository. Press {} to choose one.",
+            key_status_label(app, KeybindingCommand::ExplainContext)
+        );
         return Ok(());
     };
 
@@ -1173,6 +1360,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
         Overlay::CommitPrompt => draw_commit_prompt(frame, layout[1], app, commit_message),
         Overlay::Settings => draw_settings(frame, layout[1], app),
         Overlay::SettingsModelPicker => draw_saved_model_picker(frame, layout[1], app),
+        Overlay::KeybindingPicker => draw_keybinding_picker(frame, layout[1], app),
         Overlay::ExplainMenu => draw_explain_menu(frame, layout[1], app),
         Overlay::SessionPicker => draw_session_picker(frame, layout[1], app),
         Overlay::ModelPicker => draw_model_picker(frame, layout[1], app),
@@ -1211,7 +1399,7 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let card = home_card_rect(inner);
     let counts = app.review_counts();
     let home_state = home_state(&counts, app.review.files.len(), app.review_busy);
-    let home_content = home_content(home_state, app.status.as_str());
+    let home_content = home_content(app, home_state, app.status.as_str());
     draw_home_backdrop(frame, inner, card, usize::from(app.logo_animation.frame));
     draw_home_card_halo(frame, inner, card, usize::from(app.logo_animation.frame));
 
@@ -1292,24 +1480,32 @@ fn home_state(counts: &ReviewCounts, file_count: usize, review_busy: bool) -> Ho
     HomeState::NothingAccepted
 }
 
-fn home_content(state: HomeState, status: &str) -> HomeContent {
+fn home_content(app: &App, state: HomeState, status: &str) -> HomeContent {
+    let binding = &app.settings.keybindings;
+    let refresh = key_label(command_binding(binding, KeybindingCommand::Refresh));
+    let commit = key_label(command_binding(binding, KeybindingCommand::Commit));
+    let settings = key_label(command_binding(binding, KeybindingCommand::Settings));
     let (title, detail, fallback_status, key_hints) = match state {
         HomeState::Empty => (
             "No changes",
-            "Run your agent, then press r to refresh.",
+            "Run your agent, then refresh.",
             Some("Worktree is clean."),
-            vec![("r", "refresh"), ("s", "settings"), ("Ctrl+C", "quit")],
+            vec![
+                (refresh, "refresh"),
+                (settings, "settings"),
+                ("Ctrl+C".to_string(), "quit"),
+            ],
         ),
         HomeState::NeedsReview => (
             "Review queue",
             "",
             None,
             vec![
-                ("Enter", "review"),
-                ("r", "refresh"),
-                ("c", "commit"),
-                ("s", "settings"),
-                ("Ctrl+C", "quit"),
+                ("Enter".to_string(), "review"),
+                (refresh, "refresh"),
+                (commit, "commit"),
+                (settings, "settings"),
+                ("Ctrl+C".to_string(), "quit"),
             ],
         ),
         HomeState::ReadyToCommit => (
@@ -1317,11 +1513,11 @@ fn home_content(state: HomeState, status: &str) -> HomeContent {
             "",
             None,
             vec![
-                ("c", "commit"),
-                ("Enter", "review"),
-                ("r", "refresh"),
-                ("s", "settings"),
-                ("Ctrl+C", "quit"),
+                (commit, "commit"),
+                ("Enter".to_string(), "review"),
+                (refresh, "refresh"),
+                (settings, "settings"),
+                ("Ctrl+C".to_string(), "quit"),
             ],
         ),
         HomeState::NothingAccepted => (
@@ -1329,17 +1525,17 @@ fn home_content(state: HomeState, status: &str) -> HomeContent {
             "Rejected changes stay in your worktree.",
             None,
             vec![
-                ("Enter", "review"),
-                ("r", "refresh"),
-                ("s", "settings"),
-                ("Ctrl+C", "quit"),
+                ("Enter".to_string(), "review"),
+                (refresh, "refresh"),
+                (settings, "settings"),
+                ("Ctrl+C".to_string(), "quit"),
             ],
         ),
         HomeState::Busy => (
             "Updating review",
             "",
             Some("Applying latest decision."),
-            vec![("s", "settings"), ("Ctrl+C", "quit")],
+            vec![(settings, "settings"), ("Ctrl+C".to_string(), "quit")],
         ),
     };
 
@@ -1362,13 +1558,21 @@ fn should_show_home_status(status: &str) -> bool {
     !status.is_empty() && status != HOME_DEFAULT_STATUS
 }
 
-fn home_key_hint_line(hints: &[(&'static str, &'static str)]) -> Line<'static> {
+fn key_label(key: char) -> String {
+    key.to_string()
+}
+
+fn key_hint_span(app: &App, command: KeybindingCommand) -> Span<'static> {
+    Span::styled(key_label(key_for(app, command)), styles::keybind())
+}
+
+fn home_key_hint_line(hints: &[(String, &'static str)]) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, (key, label)) in hints.iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw("      "));
         }
-        spans.push(Span::styled(*key, styles::keybind()));
+        spans.push(Span::styled(key.clone(), styles::keybind()));
         spans.push(Span::styled(format!(" {label}"), styles::muted()));
     }
     Line::from(spans)
@@ -1952,6 +2156,112 @@ fn draw_saved_model_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     );
 }
 
+fn draw_keybinding_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let modal = centered_rect(70, 62, area);
+    frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
+        modal,
+    );
+    let inner = modal.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(4), Constraint::Length(3)])
+        .split(inner);
+
+    let rows = keybinding_picker_items(app);
+    let mut state = ListState::default().with_selected(Some(app.keybinding_cursor));
+    frame.render_stateful_widget(
+        List::new(rows).block(
+            Block::default()
+                .title(Line::from(Span::styled("Keybindings", styles::title())))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
+                .style(Style::default().bg(styles::SURFACE_RAISED)),
+        ),
+        sections[0],
+        &mut state,
+    );
+
+    let help = if let Some(command) = app.keybinding_capture {
+        Line::from(vec![
+            Span::styled("Press a lowercase letter", styles::keybind()),
+            Span::styled(format!(" for {}", command_label(command)), styles::muted()),
+            Span::raw("  "),
+            Span::styled("Esc", styles::keybind()),
+            Span::styled(" cancel", styles::muted()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(
+                key_for(app, KeybindingCommand::MoveDown).to_string(),
+                styles::keybind(),
+            ),
+            Span::raw("/"),
+            Span::styled(
+                key_for(app, KeybindingCommand::MoveUp).to_string(),
+                styles::keybind(),
+            ),
+            Span::styled(" move", styles::muted()),
+            Span::raw("  "),
+            Span::styled("Enter", styles::keybind()),
+            Span::styled(" rebind", styles::muted()),
+            Span::raw("  "),
+            Span::styled("Esc", styles::keybind()),
+            Span::styled(" back", styles::muted()),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            help,
+            Line::from(Span::styled(
+                "Each letter can be assigned to only one command.",
+                styles::subtle(),
+            )),
+        ])
+        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        sections[1],
+    );
+}
+
+fn keybinding_picker_items(app: &App) -> Vec<ListItem<'static>> {
+    KEYBINDING_COMMANDS
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, command)| {
+            let selected = index == app.keybinding_cursor;
+            let capturing = app.keybinding_capture == Some(command);
+            let style = if selected || capturing {
+                Style::default()
+                    .fg(styles::TEXT_PRIMARY)
+                    .bg(styles::ACCENT_DIM)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(styles::TEXT_MUTED)
+            };
+            let marker = if capturing {
+                "*"
+            } else if selected {
+                ">"
+            } else {
+                " "
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{marker} {:<26}", command_label(command)), style),
+                Span::styled(" ", style),
+                Span::styled(
+                    command_binding(&app.settings.keybindings, command).to_string(),
+                    styles::keybind(),
+                ),
+            ]))
+        })
+        .collect()
+}
+
 fn draw_model_picker_modal(
     frame: &mut ratatui::Frame,
     area: Rect,
@@ -2115,12 +2425,12 @@ fn explain_panel_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = explain_context_lines(app);
 
     let Some(run) = current_explain_run(app) else {
-        lines.extend(explain_empty_lines());
+        lines.extend(explain_empty_lines(app));
         return lines;
     };
 
     lines.push(Line::from(Span::raw("")));
-    lines.extend(render_explain_run_lines(run, &app.logo_animation));
+    lines.extend(render_explain_run_lines(app, run, &app.logo_animation));
     lines.push(Line::from(Span::raw("")));
     lines.extend(explain_footer_lines(app));
     lines
@@ -2167,23 +2477,23 @@ fn explain_menu_lines(app: &App) -> Vec<Line<'static>> {
             Span::styled(" run explain", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled("o", styles::keybind()),
+            key_hint_span(app, KeybindingCommand::ExplainContext),
             Span::styled(" choose context", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled("m", styles::keybind()),
+            key_hint_span(app, KeybindingCommand::ExplainModel),
             Span::styled(" choose model", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled("h", styles::keybind()),
+            key_hint_span(app, KeybindingCommand::ExplainHistory),
             Span::styled(" open history", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled("t", styles::keybind()),
+            key_hint_span(app, KeybindingCommand::ExplainRetry),
             Span::styled(" retry current run", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled("z", styles::keybind()),
+            key_hint_span(app, KeybindingCommand::ExplainCancel),
             Span::styled(" cancel current run", styles::muted()),
         ]),
         Line::from(vec![
@@ -2212,32 +2522,50 @@ fn explain_menu_detail_line(label: &str, value: String) -> Line<'static> {
     ])
 }
 
-fn explain_empty_lines() -> Vec<Line<'static>> {
+fn explain_empty_lines(app: &App) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::raw("")),
         Line::from(Span::styled("Explain the current change", styles::title())),
         Line::from(vec![
-            Span::styled(" e ", styles::keybind()),
+            Span::styled(
+                format!(" {} ", key_for(app, KeybindingCommand::Explain)),
+                styles::keybind(),
+            ),
             Span::styled("open the Explain menu", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled(" m ", styles::keybind()),
+            Span::styled(
+                format!(" {} ", key_for(app, KeybindingCommand::ExplainModel)),
+                styles::keybind(),
+            ),
             Span::styled("choose model", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled(" o ", styles::keybind()),
+            Span::styled(
+                format!(" {} ", key_for(app, KeybindingCommand::ExplainContext)),
+                styles::keybind(),
+            ),
             Span::styled("choose context source", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled(" h ", styles::keybind()),
+            Span::styled(
+                format!(" {} ", key_for(app, KeybindingCommand::ExplainHistory)),
+                styles::keybind(),
+            ),
             Span::styled("open explain history", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled(" z ", styles::keybind()),
+            Span::styled(
+                format!(" {} ", key_for(app, KeybindingCommand::ExplainCancel)),
+                styles::keybind(),
+            ),
             Span::styled("cancel current run", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled(" t ", styles::keybind()),
+            Span::styled(
+                format!(" {} ", key_for(app, KeybindingCommand::ExplainRetry)),
+                styles::keybind(),
+            ),
             Span::styled("retry current run", styles::muted()),
         ]),
         Line::from(Span::raw("")),
@@ -2250,22 +2578,22 @@ fn explain_empty_lines() -> Vec<Line<'static>> {
 
 fn explain_footer_lines(app: &App) -> Vec<Line<'static>> {
     vec![Line::from(vec![
-        Span::styled("e", styles::keybind()),
+        key_hint_span(app, KeybindingCommand::Explain),
         Span::styled(" menu", styles::muted()),
         Span::raw("  "),
-        Span::styled("s", styles::keybind()),
+        key_hint_span(app, KeybindingCommand::Settings),
         Span::styled(" settings", styles::muted()),
         Span::raw("  "),
-        Span::styled("h", styles::keybind()),
+        key_hint_span(app, KeybindingCommand::ExplainHistory),
         Span::styled(
             format!(" history ({})", app.why_this.runs.len()),
             styles::muted(),
         ),
         Span::raw("  "),
-        Span::styled("t", styles::keybind()),
+        key_hint_span(app, KeybindingCommand::ExplainRetry),
         Span::styled(" retry", styles::muted()),
         Span::raw("  "),
-        Span::styled("z", styles::keybind()),
+        key_hint_span(app, KeybindingCommand::ExplainCancel),
         Span::styled(" cancel", styles::muted()),
     ])]
 }
@@ -2289,20 +2617,27 @@ fn explain_history_lines(app: &App) -> Vec<Line<'static>> {
     lines.extend(render_explain_history_list_lines(app));
     lines.push(Line::from(Span::raw("")));
     if let Some(run) = selected_history_run(app) {
-        lines.extend(render_explain_run_lines(run, &app.logo_animation));
+        lines.extend(render_explain_run_lines(app, run, &app.logo_animation));
     }
     lines.push(Line::from(Span::raw("")));
     lines.push(Line::from(vec![
-        Span::styled("j/k", styles::keybind()),
+        Span::styled(
+            format!(
+                "{}/{}",
+                key_for(app, KeybindingCommand::MoveDown),
+                key_for(app, KeybindingCommand::MoveUp)
+            ),
+            styles::keybind(),
+        ),
         Span::styled(" move", styles::muted()),
         Span::raw("  "),
         Span::styled("Enter", styles::keybind()),
         Span::styled(" focus", styles::muted()),
         Span::raw("  "),
-        Span::styled("t", styles::keybind()),
+        key_hint_span(app, KeybindingCommand::ExplainRetry),
         Span::styled(" retry", styles::muted()),
         Span::raw("  "),
-        Span::styled("z", styles::keybind()),
+        key_hint_span(app, KeybindingCommand::ExplainCancel),
         Span::styled(" cancel", styles::muted()),
         Span::raw("  "),
         Span::styled("Del", styles::keybind()),
@@ -2339,7 +2674,11 @@ fn render_explain_history_list_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_explain_run_lines(run: &ExplainRun, animation: &AnimatedTextState) -> Vec<Line<'static>> {
+fn render_explain_run_lines(
+    app: &App,
+    run: &ExplainRun,
+    animation: &AnimatedTextState,
+) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(run.label.clone(), styles::title())),
         Line::from(Span::styled(
@@ -2392,7 +2731,11 @@ fn render_explain_run_lines(run: &ExplainRun, animation: &AnimatedTextState) -> 
                 lines.push(Line::from(Span::raw(error.clone())));
             }
             lines.push(Line::from(Span::styled(
-                "Press t to retry, or press m to switch models.",
+                format!(
+                    "Press {} to retry, or press {} to switch models.",
+                    key_status_label(app, KeybindingCommand::ExplainRetry),
+                    key_status_label(app, KeybindingCommand::ExplainModel)
+                ),
                 styles::muted(),
             )));
         }
@@ -2505,8 +2848,9 @@ fn clear_run_by_index(app: &mut App, index: usize) {
 
     if matches!(run.status, ExplainRunStatus::Running) {
         app.status = format!(
-            "Explain run #{} is still running. Press z to cancel it.",
-            run.id
+            "Explain run #{} is still running. Press {} to cancel it.",
+            run.id,
+            key_status_label(app, KeybindingCommand::ExplainCancel)
         );
         return;
     }
@@ -2584,27 +2928,124 @@ fn save_settings(app: &mut App) {
 }
 
 fn settings_row_count() -> usize {
-    1
+    SETTINGS_ROWS.len()
 }
 
 fn saved_model_label(model: &Option<String>) -> String {
     model.clone().unwrap_or_else(|| "Auto".to_string())
 }
 
-fn settings_lines(app: &App) -> Vec<Line<'static>> {
-    let rows = [(
-        "Default Explain model",
-        saved_model_label(&app.settings.explain.default_model),
-        "Press Enter to choose the saved default model.",
-    )];
+fn command_binding(settings: &KeybindingsSettings, command: KeybindingCommand) -> char {
+    command_binding_value(settings, command)
+        .chars()
+        .next()
+        .filter(|ch| is_valid_keybinding_char(*ch))
+        .unwrap_or_else(|| {
+            command_binding_value(&KeybindingsSettings::default(), command)
+                .chars()
+                .next()
+                .expect("default keybinding must not be empty")
+        })
+}
 
+fn command_binding_value(settings: &KeybindingsSettings, command: KeybindingCommand) -> &str {
+    match command {
+        KeybindingCommand::Refresh => &settings.refresh,
+        KeybindingCommand::Commit => &settings.commit,
+        KeybindingCommand::Settings => &settings.settings,
+        KeybindingCommand::Accept => &settings.accept,
+        KeybindingCommand::Reject => &settings.reject,
+        KeybindingCommand::Unreview => &settings.unreview,
+        KeybindingCommand::Explain => &settings.explain,
+        KeybindingCommand::ExplainContext => &settings.explain_context,
+        KeybindingCommand::ExplainModel => &settings.explain_model,
+        KeybindingCommand::ExplainHistory => &settings.explain_history,
+        KeybindingCommand::ExplainRetry => &settings.explain_retry,
+        KeybindingCommand::ExplainCancel => &settings.explain_cancel,
+        KeybindingCommand::MoveDown => &settings.move_down,
+        KeybindingCommand::MoveUp => &settings.move_up,
+    }
+}
+
+fn set_command_binding(settings: &mut KeybindingsSettings, command: KeybindingCommand, key: char) {
+    let key = key.to_string();
+    match command {
+        KeybindingCommand::Refresh => settings.refresh = key,
+        KeybindingCommand::Commit => settings.commit = key,
+        KeybindingCommand::Settings => settings.settings = key,
+        KeybindingCommand::Accept => settings.accept = key,
+        KeybindingCommand::Reject => settings.reject = key,
+        KeybindingCommand::Unreview => settings.unreview = key,
+        KeybindingCommand::Explain => settings.explain = key,
+        KeybindingCommand::ExplainContext => settings.explain_context = key,
+        KeybindingCommand::ExplainModel => settings.explain_model = key,
+        KeybindingCommand::ExplainHistory => settings.explain_history = key,
+        KeybindingCommand::ExplainRetry => settings.explain_retry = key,
+        KeybindingCommand::ExplainCancel => settings.explain_cancel = key,
+        KeybindingCommand::MoveDown => settings.move_down = key,
+        KeybindingCommand::MoveUp => settings.move_up = key,
+    }
+}
+
+fn command_label(command: KeybindingCommand) -> &'static str {
+    match command {
+        KeybindingCommand::Refresh => "Refresh changes",
+        KeybindingCommand::Commit => "Commit accepted",
+        KeybindingCommand::Settings => "Open settings",
+        KeybindingCommand::Accept => "Accept change",
+        KeybindingCommand::Reject => "Reject change",
+        KeybindingCommand::Unreview => "Move to unreviewed",
+        KeybindingCommand::Explain => "Open Explain",
+        KeybindingCommand::ExplainContext => "Choose Explain context",
+        KeybindingCommand::ExplainModel => "Choose Explain model",
+        KeybindingCommand::ExplainHistory => "Open Explain history",
+        KeybindingCommand::ExplainRetry => "Retry Explain",
+        KeybindingCommand::ExplainCancel => "Cancel Explain",
+        KeybindingCommand::MoveDown => "Move down",
+        KeybindingCommand::MoveUp => "Move up",
+    }
+}
+
+fn key_for(app: &App, command: KeybindingCommand) -> char {
+    command_binding(&app.settings.keybindings, command)
+}
+
+fn key_status_label(app: &App, command: KeybindingCommand) -> String {
+    key_label(key_for(app, command))
+}
+
+fn key_matches(app: &App, key: KeyEvent, command: KeybindingCommand) -> bool {
+    key.modifiers == KeyModifiers::NONE && key.code == KeyCode::Char(key_for(app, command))
+}
+
+fn is_valid_keybinding_char(ch: char) -> bool {
+    ch.is_ascii_lowercase()
+}
+
+fn keybinding_conflict(
+    settings: &KeybindingsSettings,
+    command: KeybindingCommand,
+    key: char,
+) -> Option<KeybindingCommand> {
+    KEYBINDING_COMMANDS
+        .iter()
+        .copied()
+        .find(|candidate| *candidate != command && command_binding(settings, *candidate) == key)
+}
+
+fn selected_keybinding_command(app: &App) -> KeybindingCommand {
+    KEYBINDING_COMMANDS[app.keybinding_cursor.min(KEYBINDING_COMMANDS.len() - 1)]
+}
+
+fn settings_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         format!("Config: {}", app.settings_store.path().display()),
         styles::soft_accent(),
     ))];
     lines.push(Line::from(Span::raw("")));
 
-    for (index, (label, value, hint)) in rows.into_iter().enumerate() {
+    for (index, row) in SETTINGS_ROWS.iter().copied().enumerate() {
+        let (label, value, hint) = settings_row_content(app, row);
         let selected = index == app.settings_cursor;
         let row_style = if selected {
             Style::default()
@@ -2628,6 +3069,21 @@ fn settings_lines(app: &App) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn settings_row_content(app: &App, row: SettingsRow) -> (&'static str, String, &'static str) {
+    match row {
+        SettingsRow::DefaultExplainModel => (
+            "Default Explain model",
+            saved_model_label(&app.settings.explain.default_model),
+            "Press Enter to choose the saved default model.",
+        ),
+        SettingsRow::Keybindings => (
+            "Keybindings",
+            format!("{} commands", KEYBINDING_COMMANDS.len()),
+            "Press Enter to customize letter keybindings.",
+        ),
+    }
 }
 
 fn saved_model_choice(app: &App) -> WhyModelChoice {
@@ -2862,7 +3318,14 @@ fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("j/k", styles::keybind()),
+            Span::styled(
+                format!(
+                    "{}/{}",
+                    key_for(app, KeybindingCommand::MoveDown),
+                    key_for(app, KeybindingCommand::MoveUp)
+                ),
+                styles::keybind(),
+            ),
             Span::styled(" move", styles::muted()),
             Span::raw("  "),
             Span::styled("Enter", styles::keybind()),
@@ -3206,6 +3669,8 @@ mod tests {
             settings: AppSettings::default(),
             settings_store: SettingsStore::from_path(PathBuf::from("/tmp/better-review-test.json")),
             settings_cursor: 0,
+            keybinding_cursor: 0,
+            keybinding_capture: None,
             saved_model_cursor: 0,
             session_state: SessionUiState::default(),
             why_this: WhyThisUiState::default(),
@@ -3389,23 +3854,24 @@ mod tests {
 
     #[test]
     fn home_content_and_key_hints_follow_state() {
-        let empty = home_content(HomeState::Empty, "");
+        let app = sample_app(ReviewUiState::default());
+        let empty = home_content(&app, HomeState::Empty, "");
         assert_eq!(empty.title, "No changes");
-        assert_eq!(empty.detail, "Run your agent, then press r to refresh.");
+        assert_eq!(empty.detail, "Run your agent, then refresh.");
         assert_eq!(empty.status, Some("Worktree is clean.".to_string()));
-        assert_eq!(empty.key_hints[0], ("r", "refresh"));
+        assert_eq!(empty.key_hints[0], ("r".to_string(), "refresh"));
 
-        let queue = home_content(HomeState::NeedsReview, HOME_DEFAULT_STATUS);
+        let queue = home_content(&app, HomeState::NeedsReview, HOME_DEFAULT_STATUS);
         assert_eq!(queue.title, "Review queue");
         assert_eq!(queue.detail, "");
         assert_eq!(queue.status, None);
-        assert!(queue.key_hints.contains(&("r", "refresh")));
+        assert!(queue.key_hints.contains(&("r".to_string(), "refresh")));
 
-        let ready = home_content(HomeState::ReadyToCommit, "Accepted hunk.");
+        let ready = home_content(&app, HomeState::ReadyToCommit, "Accepted hunk.");
         assert_eq!(ready.title, "Ready to commit");
         assert_eq!(ready.status, Some("Accepted hunk.".to_string()));
-        assert_eq!(ready.key_hints[0], ("c", "commit"));
-        assert!(ready.key_hints.contains(&("r", "refresh")));
+        assert_eq!(ready.key_hints[0], ("c".to_string(), "commit"));
+        assert!(ready.key_hints.contains(&("r".to_string(), "refresh")));
 
         let text = home_key_hint_line(&ready.key_hints)
             .spans
@@ -3441,6 +3907,41 @@ mod tests {
         assert_eq!(mixed, "[■■■■□□□□] 2 / 4 reviewed");
         assert_eq!(progress_segments(2, 4), 4);
         assert_eq!(reviewed_progress_segments(&mixed_counts, 4), (2, 2));
+    }
+
+    #[test]
+    fn keybinding_helpers_detect_duplicates_and_update_bindings() {
+        let mut bindings = KeybindingsSettings::default();
+        assert_eq!(command_binding(&bindings, KeybindingCommand::Refresh), 'r');
+        assert_eq!(
+            keybinding_conflict(&bindings, KeybindingCommand::Refresh, 'c'),
+            Some(KeybindingCommand::Commit)
+        );
+
+        set_command_binding(&mut bindings, KeybindingCommand::Refresh, 'a');
+
+        assert_eq!(command_binding(&bindings, KeybindingCommand::Refresh), 'a');
+        assert_eq!(
+            keybinding_conflict(&bindings, KeybindingCommand::Refresh, 'r'),
+            None
+        );
+        assert!(is_valid_keybinding_char('a'));
+        assert!(!is_valid_keybinding_char('A'));
+    }
+
+    #[test]
+    fn keybinding_picker_prevents_duplicate_assignments() {
+        let mut app = sample_app(ReviewUiState::default());
+        open_keybinding_picker(&mut app);
+        app.keybinding_capture = Some(KeybindingCommand::Refresh);
+
+        handle_keybinding_picker_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+        );
+
+        assert_eq!(key_for(&app, KeybindingCommand::Refresh), 'r');
+        assert!(app.status.contains("already assigned"));
     }
 
     #[test]
@@ -3813,6 +4314,7 @@ mod tests {
             explain: ExplainSettings {
                 default_model: Some("openai/gpt-5.4".to_string()),
             },
+            keybindings: KeybindingsSettings::default(),
         };
         app.why_this.model.available = vec!["openai/gpt-5.4".to_string()];
         app.why_this.model_override = Some(WhyModelChoice::Explicit("openai/gpt-5".to_string()));
@@ -4005,6 +4507,34 @@ mod tests {
             Some(WhyModelChoice::Explicit(ref model)) if model == "openai/gpt-5"
         ));
         assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn clear_history_run_reports_configured_cancel_key_for_running_run() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.settings.keybindings.explain_cancel = "q".to_string();
+        app.why_this.runs = vec![ExplainRun {
+            id: 9,
+            label: "job".to_string(),
+            target: why_target_for_file(&sample_file()),
+            context_source_id: "ses_1".to_string(),
+            context_source_label: "session".to_string(),
+            requested_model: None,
+            model_label: "Auto".to_string(),
+            cache_key: "cache".to_string(),
+            status: ExplainRunStatus::Running,
+            result: None,
+            error: None,
+            handle: None,
+        }];
+        app.why_this.history_cursor = 0;
+
+        clear_history_run(&mut app);
+
+        assert!(app.status.contains("Press q to cancel it"));
     }
 
     #[test]

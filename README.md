@@ -33,6 +33,7 @@
 - Safe behavior in dirty repositories and partially staged states
 - Optional `Explain` panel backed by local `opencode` sessions
 - Session-local Explain history, retry, cancel, and model selection
+- Configurable single-letter keybindings with duplicate prevention
 - Prebuilt release binaries for Linux and macOS
 
 ## Installation
@@ -164,6 +165,8 @@ If `opencode` is unavailable, the rest of `better-review` still works normally.
 | `z` | Cancel the current Explain run |
 | `Ctrl+C` | Quit |
 
+Single-letter command keybindings can be changed from Settings. Each letter can be assigned to only one command.
+
 ## Repository Support
 
 The current implementation is tested against these repository states:
@@ -239,5 +242,3 @@ CI also enforces line coverage floors, including stricter thresholds for critica
 ### Docs and tests
 
 If you change user-visible behavior, update the README and the relevant tests in the same pull request.
-
-## hellllllloooooooo
