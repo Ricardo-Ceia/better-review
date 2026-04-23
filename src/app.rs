@@ -29,6 +29,7 @@ use crate::services::opencode::{
     OpencodeService, OpencodeSession, WhyAnswer, WhyRiskLevel, WhyTarget, why_target_for_file,
     why_target_for_hunk,
 };
+use crate::settings::{AppSettings, SettingsStore, StartScreen};
 use crate::ui::styles;
 
 pub async fn run() -> Result<()> {
@@ -61,6 +62,9 @@ struct App {
     repo_path: PathBuf,
     git: GitService,
     opencode: Option<OpencodeService>,
+    settings: AppSettings,
+    settings_store: SettingsStore,
+    settings_cursor: usize,
     session_state: SessionUiState,
     why_this: WhyThisUiState,
     status: String,
@@ -78,6 +82,7 @@ struct App {
 enum Overlay {
     None,
     CommitPrompt,
+    Settings,
     ExplainMenu,
     SessionPicker,
     ModelPicker,
@@ -140,6 +145,7 @@ struct WhyThisUiState {
     history_cursor: usize,
     next_run_id: u64,
     model: WhyModelState,
+    model_override: Option<WhyModelChoice>,
     return_to_menu: bool,
 }
 
@@ -188,11 +194,18 @@ impl App {
         let repo_path = std::env::current_dir()?;
         let git = GitService::new(&repo_path);
         let opencode = OpencodeService::new(&repo_path).ok();
+        let settings_store = SettingsStore::new()?;
+        let settings = settings_store
+            .load()
+            .unwrap_or_else(|_| AppSettings::default());
         let (tx, rx) = mpsc::unbounded_channel();
         let mut app = Self {
             repo_path,
             git,
             opencode,
+            settings,
+            settings_store,
+            settings_cursor: 0,
             session_state: SessionUiState::default(),
             why_this: WhyThisUiState::default(),
             status: "Run your coding agent elsewhere, then open better-review to review changes."
@@ -214,10 +227,21 @@ impl App {
         let (_, files) = self.git.collect_diff().await?;
         self.review.files = files;
         self.had_staged_changes_on_open = self.git.has_staged_changes().await?;
+        self.apply_saved_settings();
         self.load_sessions()?;
         self.refresh_auto_model();
 
+        if self.settings.ui.start_screen == StartScreen::ReviewIfChanges
+            && !self.review.files.is_empty()
+        {
+            self.screen = Screen::Review;
+        }
+
         Ok(())
+    }
+
+    fn apply_saved_settings(&mut self) {
+        self.why_this.model.choice = WhyModelChoice::Auto;
     }
 
     fn load_sessions(&mut self) -> Result<()> {
@@ -371,8 +395,10 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
     let mut commit_message = new_commit_message_input();
 
     loop {
-        app.logo_animation
-            .tick_with_text_width(usize::from(brand_lockup_width()));
+        if !app.settings.ui.reduced_motion {
+            app.logo_animation
+                .tick_with_text_width(usize::from(brand_lockup_width()));
+        }
 
         while let Ok(message) = app.rx.try_recv() {
             match message {
@@ -440,15 +466,15 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                     app.why_this.model.loading = false;
                     match result {
                         Ok(mut models) => {
-                            if let WhyModelChoice::Explicit(explicit) = &app.why_this.model.choice
-                                && !models.contains(explicit)
+                            if let WhyModelChoice::Explicit(explicit) = current_model_choice(&app)
+                                && !models.contains(&explicit)
                             {
-                                models.insert(0, explicit.clone());
+                                models.insert(0, explicit);
                             }
 
                             app.why_this.model.available = models;
                             app.why_this.model.cursor = model_picker_cursor(
-                                &app.why_this.model.choice,
+                                &current_model_choice(&app),
                                 &app.why_this.model.available,
                             );
                             app.why_this.model.last_loaded_at = Some(Instant::now());
@@ -492,6 +518,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         commit_message.input(to_textarea_input(key));
                     }
                 },
+                Overlay::Settings => handle_settings_key(&mut app, key),
                 Overlay::ExplainMenu => handle_explain_menu_key(&mut app, key).await?,
                 Overlay::SessionPicker => handle_session_picker_key(&mut app, key),
                 Overlay::ModelPicker => handle_model_picker_key(&mut app, key),
@@ -520,6 +547,11 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         } else {
                             commit_message = app.open_commit_prompt();
                         }
+                        continue;
+                    }
+
+                    if key.code == KeyCode::Char(',') {
+                        open_settings(&mut app);
                         continue;
                     }
 
@@ -680,6 +712,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.why_this.return_to_menu = false;
             open_session_picker(app)
         }
+        KeyCode::Char(',') => open_settings(app),
         KeyCode::Char('e') => open_explain_menu(app),
         KeyCode::Char('h') => {
             app.why_this.return_to_menu = false;
@@ -798,7 +831,7 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Enter => {
             if app.why_this.model.cursor == 0 {
-                app.why_this.model.choice = WhyModelChoice::Auto;
+                app.why_this.model_override = Some(WhyModelChoice::Auto);
                 app.status = format!("Explain model set to {}.", why_model_display_label(app));
             } else if let Some(model) = app
                 .why_this
@@ -807,7 +840,7 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
                 .get(app.why_this.model.cursor - 1)
                 .cloned()
             {
-                app.why_this.model.choice = WhyModelChoice::Explicit(model.clone());
+                app.why_this.model_override = Some(WhyModelChoice::Explicit(model.clone()));
                 app.status = format!("Explain model set to {model}.");
             }
             if app.why_this.return_to_menu {
@@ -815,6 +848,31 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) {
             } else {
                 app.overlay = Overlay::None;
             }
+        }
+        _ => {}
+    }
+}
+
+fn handle_settings_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.overlay = Overlay::None;
+            app.status = format!(
+                "Closed settings. Config: {}",
+                app.settings_store.path().display()
+            );
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.settings_cursor = app.settings_cursor.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') if app.settings_cursor + 1 < settings_row_count() => {
+            app.settings_cursor += 1;
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            cycle_settings_value(app, false);
+        }
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+            cycle_settings_value(app, true);
         }
         _ => {}
     }
@@ -829,7 +887,7 @@ async fn open_model_picker(app: &mut App) {
 
     app.overlay = Overlay::ModelPicker;
     app.why_this.model.cursor =
-        model_picker_cursor(&app.why_this.model.choice, &app.why_this.model.available);
+        model_picker_cursor(&current_model_choice(app), &app.why_this.model.available);
 
     let is_cache_fresh = app
         .why_this
@@ -996,6 +1054,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
 
     match app.overlay {
         Overlay::CommitPrompt => draw_commit_prompt(frame, layout[1], app, commit_message),
+        Overlay::Settings => draw_settings(frame, layout[1], app),
         Overlay::ExplainMenu => draw_explain_menu(frame, layout[1], app),
         Overlay::SessionPicker => draw_session_picker(frame, layout[1], app),
         Overlay::ModelPicker => draw_model_picker(frame, layout[1], app),
@@ -1115,6 +1174,9 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::raw("      "),
             Span::styled("c", styles::keybind()),
             Span::styled(" commit", styles::muted()),
+            Span::raw("      "),
+            Span::styled(",", styles::keybind()),
+            Span::styled(" settings", styles::muted()),
             Span::raw("      "),
             Span::styled("Ctrl+C", styles::keybind()),
             Span::styled(" quit", styles::muted()),
@@ -1684,6 +1746,9 @@ fn explain_footer_lines(app: &App) -> Vec<Line<'static>> {
         Span::styled("e", styles::keybind()),
         Span::styled(" menu", styles::muted()),
         Span::raw("  "),
+        Span::styled(",", styles::keybind()),
+        Span::styled(" settings", styles::muted()),
+        Span::raw("  "),
         Span::styled("h", styles::keybind()),
         Span::styled(
             format!(" history ({})", app.why_this.runs.len()),
@@ -1991,6 +2056,160 @@ fn open_explain_history(app: &mut App) {
     app.status = "Opened Explain history.".to_string();
 }
 
+fn open_settings(app: &mut App) {
+    app.overlay = Overlay::Settings;
+    app.settings_cursor = 0;
+    app.status = format!(
+        "Settings loaded from {}.",
+        app.settings_store.path().display()
+    );
+}
+
+fn save_settings(app: &mut App) {
+    match app.settings_store.save(&app.settings) {
+        Ok(()) => {
+            app.apply_saved_settings();
+        }
+        Err(error) => {
+            app.status = format!("Could not save settings: {error}");
+        }
+    }
+}
+
+fn settings_row_count() -> usize {
+    3
+}
+
+fn cycle_settings_value(app: &mut App, forward: bool) {
+    match app.settings_cursor {
+        0 => {
+            app.settings.ui.start_screen = match app.settings.ui.start_screen {
+                StartScreen::Home => StartScreen::ReviewIfChanges,
+                StartScreen::ReviewIfChanges => StartScreen::Home,
+            };
+            save_settings(app);
+            app.status = format!(
+                "Start screen set to {}.",
+                start_screen_label(app.settings.ui.start_screen)
+            );
+        }
+        1 => {
+            app.settings.ui.reduced_motion = !app.settings.ui.reduced_motion;
+            save_settings(app);
+            app.status = format!(
+                "Reduced motion {}.",
+                if app.settings.ui.reduced_motion {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+        }
+        2 => {
+            let next = next_saved_model_choice(&app.settings.explain.default_model, forward);
+            app.settings.explain.default_model = next;
+            save_settings(app);
+            app.status = format!(
+                "Default Explain model set to {}.",
+                saved_model_label(&app.settings.explain.default_model)
+            );
+        }
+        _ => {}
+    }
+}
+
+fn start_screen_label(value: StartScreen) -> &'static str {
+    match value {
+        StartScreen::Home => "Home",
+        StartScreen::ReviewIfChanges => "Review when changes exist",
+    }
+}
+
+fn saved_model_label(model: &Option<String>) -> String {
+    model.clone().unwrap_or_else(|| "Auto".to_string())
+}
+
+fn next_saved_model_choice(current: &Option<String>, forward: bool) -> Option<String> {
+    const MODEL_OPTIONS: [&str; 4] = [
+        "Auto",
+        "openai/gpt-5.4",
+        "openai/gpt-5",
+        "github-copilot/gpt-5.3-codex",
+    ];
+
+    let current_label = current.as_deref().unwrap_or("Auto");
+    let current_index = MODEL_OPTIONS
+        .iter()
+        .position(|candidate| *candidate == current_label)
+        .unwrap_or(0);
+    let next_index = if forward {
+        (current_index + 1) % MODEL_OPTIONS.len()
+    } else {
+        (current_index + MODEL_OPTIONS.len() - 1) % MODEL_OPTIONS.len()
+    };
+    let next = MODEL_OPTIONS[next_index];
+    if next == "Auto" {
+        None
+    } else {
+        Some(next.to_string())
+    }
+}
+
+fn settings_lines(app: &App) -> Vec<Line<'static>> {
+    let rows = [
+        (
+            "Start screen",
+            start_screen_label(app.settings.ui.start_screen).to_string(),
+            "Choose where the app opens.",
+        ),
+        (
+            "Reduced motion",
+            if app.settings.ui.reduced_motion {
+                "On".to_string()
+            } else {
+                "Off".to_string()
+            },
+            "Reduce brand and loading animation intensity.",
+        ),
+        (
+            "Explain model",
+            saved_model_label(&app.settings.explain.default_model),
+            "Persistent default for Explain. Press Enter to cycle saved choices.",
+        ),
+    ];
+
+    let mut lines = vec![Line::from(Span::styled(
+        format!("Config: {}", app.settings_store.path().display()),
+        styles::soft_accent(),
+    ))];
+    lines.push(Line::from(Span::raw("")));
+
+    for (index, (label, value, hint)) in rows.into_iter().enumerate() {
+        let selected = index == app.settings_cursor;
+        let row_style = if selected {
+            Style::default()
+                .fg(styles::TEXT_PRIMARY)
+                .bg(styles::ACCENT_DIM)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(styles::TEXT_MUTED)
+        };
+        let marker = if selected { ">" } else { " " };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} {label:<15}"), row_style),
+            Span::styled(value, row_style),
+        ]));
+        if selected {
+            lines.push(Line::from(Span::styled(
+                format!("  {hint}"),
+                styles::muted(),
+            )));
+        }
+    }
+
+    lines
+}
+
 async fn retry_current_explain(app: &mut App) -> Result<()> {
     let Some(run_id) = app.why_this.current_run_id else {
         app.status = "No current explain run.".to_string();
@@ -2140,6 +2359,56 @@ fn draw_commit_prompt(
     );
 }
 
+fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let modal = centered_rect(68, 52, area);
+    frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
+        modal,
+    );
+    let inner = modal.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(4), Constraint::Length(2)])
+        .split(inner);
+
+    let rows = settings_lines(app);
+    frame.render_widget(
+        Paragraph::new(rows)
+            .block(
+                Block::default()
+                    .title(Line::from(Span::styled("Settings", styles::title())))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
+                    .style(Style::default().bg(styles::SURFACE_RAISED)),
+            )
+            .style(Style::default().bg(styles::SURFACE_RAISED))
+            .wrap(Wrap { trim: true }),
+        sections[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("j/k", styles::keybind()),
+            Span::styled(" move", styles::muted()),
+            Span::raw("  "),
+            Span::styled("h/l", styles::keybind()),
+            Span::styled(" change", styles::muted()),
+            Span::raw("  "),
+            Span::styled("Enter", styles::keybind()),
+            Span::styled(" toggle", styles::muted()),
+            Span::raw("  "),
+            Span::styled("Esc", styles::keybind()),
+            Span::styled(" close", styles::muted()),
+        ]))
+        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        sections[1],
+    );
+}
+
 fn review_render_line_count(file: &FileDiff) -> usize {
     1 + file
         .hunks
@@ -2226,25 +2495,38 @@ fn model_picker_cursor(choice: &WhyModelChoice, models: &[String]) -> usize {
     }
 }
 
+fn current_model_choice(app: &App) -> WhyModelChoice {
+    app.why_this
+        .model_override
+        .clone()
+        .unwrap_or(WhyModelChoice::Auto)
+}
+
 fn resolved_why_model(app: &App) -> Option<String> {
-    match &app.why_this.model.choice {
-        WhyModelChoice::Auto => app.why_this.model.auto_session_model.clone(),
+    match current_model_choice(app) {
+        WhyModelChoice::Auto => app
+            .settings
+            .explain
+            .default_model
+            .clone()
+            .or_else(|| app.why_this.model.auto_session_model.clone()),
         WhyModelChoice::Explicit(model) => Some(model.clone()),
     }
 }
 
 fn auto_model_label(app: &App) -> String {
-    app.why_this
-        .model
-        .auto_session_model
+    app.settings
+        .explain
+        .default_model
         .clone()
+        .or_else(|| app.why_this.model.auto_session_model.clone())
         .unwrap_or_else(|| "session default".to_string())
 }
 
 fn why_model_display_label(app: &App) -> String {
-    match &app.why_this.model.choice {
+    match current_model_choice(app) {
         WhyModelChoice::Auto => format!("Auto ({})", auto_model_label(app)),
-        WhyModelChoice::Explicit(model) => model.clone(),
+        WhyModelChoice::Explicit(model) => model,
     }
 }
 
@@ -2371,17 +2653,36 @@ fn render_brand_lockup(frame: &mut ratatui::Frame, area: Rect, app: &App, alignm
     };
 
     AnimatedText::new(icon, &app.logo_animation)
-        .style(icon_style)
+        .style(if app.settings.ui.reduced_motion {
+            AnimatedTextStyle::pulse(
+                if icon == BRAND_ICON_ALT {
+                    styles::SUCCESS
+                } else {
+                    styles::ACCENT
+                },
+                if icon == BRAND_ICON_ALT {
+                    styles::SUCCESS
+                } else {
+                    styles::ACCENT
+                },
+            )
+            .modifiers(Modifier::BOLD)
+        } else {
+            icon_style
+        })
         .render(icon_area, frame.buffer_mut());
 
     if show_wordmark {
         let word_area = Rect::new(x + icon_width + gap_width, area.y, word_width, 1);
         AnimatedText::new(BRAND_WORDMARK, &app.logo_animation)
-            .style(
+            .style(if app.settings.ui.reduced_motion {
+                AnimatedTextStyle::wave(styles::TEXT_MUTED, styles::TEXT_MUTED)
+                    .modifiers(Modifier::BOLD)
+            } else {
                 AnimatedTextStyle::wave(styles::TEXT_MUTED, styles::ACCENT_BRIGHT)
                     .modifiers(Modifier::BOLD)
-                    .wave_width(4),
-            )
+                    .wave_width(4)
+            })
             .render(word_area, frame.buffer_mut());
     }
 }
@@ -2446,6 +2747,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::domain::diff::{DiffLine, DiffLineKind, FileDiff, FileStatus, Hunk, ReviewStatus};
+    use crate::settings::{ExplainSettings, UiSettings};
 
     fn sample_app(review: ReviewUiState) -> App {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -2453,6 +2755,9 @@ mod tests {
             repo_path: PathBuf::from("."),
             git: GitService::new("."),
             opencode: None,
+            settings: AppSettings::default(),
+            settings_store: SettingsStore::from_path(PathBuf::from("/tmp/better-review-test.json")),
+            settings_cursor: 0,
             session_state: SessionUiState::default(),
             why_this: WhyThisUiState::default(),
             status: String::new(),
@@ -2871,9 +3176,92 @@ mod tests {
             Some("github-copilot/gpt-5.3-codex".to_string())
         );
 
-        app.why_this.model.choice = WhyModelChoice::Explicit("openai/gpt-5".to_string());
+        app.why_this.model_override = Some(WhyModelChoice::Explicit("openai/gpt-5".to_string()));
         assert_eq!(why_model_display_label(&app), "openai/gpt-5");
         assert_eq!(resolved_why_model(&app), Some("openai/gpt-5".to_string()));
+
+        app.why_this.model_override = None;
+        app.settings.explain.default_model = Some("openai/gpt-5.4".to_string());
+        assert_eq!(why_model_display_label(&app), "Auto (openai/gpt-5.4)");
+        assert_eq!(resolved_why_model(&app), Some("openai/gpt-5.4".to_string()));
+    }
+
+    #[test]
+    fn apply_saved_settings_restores_default_explain_model() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.settings = AppSettings {
+            version: 1,
+            ui: UiSettings::default(),
+            explain: ExplainSettings {
+                default_model: Some("openai/gpt-5.4".to_string()),
+            },
+        };
+        app.why_this.model_override = Some(WhyModelChoice::Explicit("openai/gpt-5".to_string()));
+
+        app.apply_saved_settings();
+
+        assert_eq!(app.why_this.model.choice, WhyModelChoice::Auto);
+        assert_eq!(
+            app.why_this.model_override,
+            Some(WhyModelChoice::Explicit("openai/gpt-5".to_string()))
+        );
+    }
+
+    #[test]
+    fn open_settings_sets_overlay_and_status() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+
+        open_settings(&mut app);
+
+        assert_eq!(app.overlay, Overlay::Settings);
+        assert!(app.status.contains("Settings loaded from"));
+    }
+
+    #[test]
+    fn cycle_settings_value_updates_start_screen() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        let temp = tempfile::tempdir().unwrap();
+        app.settings_store = SettingsStore::from_path(temp.path().join("config.json"));
+        app.settings_cursor = 0;
+
+        cycle_settings_value(&mut app, true);
+
+        assert_eq!(app.settings.ui.start_screen, StartScreen::ReviewIfChanges);
+        assert!(
+            app.status
+                .contains("Start screen set to Review when changes exist")
+        );
+    }
+
+    #[test]
+    fn cycle_settings_value_updates_persistent_default_model() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        let temp = tempfile::tempdir().unwrap();
+        app.settings_store = SettingsStore::from_path(temp.path().join("config.json"));
+        app.settings_cursor = 2;
+
+        cycle_settings_value(&mut app, true);
+
+        assert_eq!(
+            app.settings.explain.default_model,
+            Some("openai/gpt-5.4".to_string())
+        );
+        assert!(
+            app.status
+                .contains("Default Explain model set to openai/gpt-5.4")
+        );
     }
 
     #[test]
@@ -2977,8 +3365,8 @@ mod tests {
 
         handle_model_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(
-            app.why_this.model.choice,
-            WhyModelChoice::Explicit(ref model) if model == "openai/gpt-5"
+            app.why_this.model_override,
+            Some(WhyModelChoice::Explicit(ref model)) if model == "openai/gpt-5"
         ));
         assert_eq!(app.overlay, Overlay::None);
     }
@@ -2990,11 +3378,11 @@ mod tests {
             ..ReviewUiState::default()
         });
         app.overlay = Overlay::ModelPicker;
-        app.why_this.model.choice = WhyModelChoice::Explicit("openai/gpt-5".to_string());
+        app.why_this.model_override = Some(WhyModelChoice::Explicit("openai/gpt-5".to_string()));
         app.why_this.model.cursor = 0;
 
         handle_model_picker_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.why_this.model.choice, WhyModelChoice::Auto);
+        assert_eq!(app.why_this.model_override, Some(WhyModelChoice::Auto));
 
         app.overlay = Overlay::ModelPicker;
         handle_model_picker_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));

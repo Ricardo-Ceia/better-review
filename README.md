@@ -123,12 +123,13 @@ If the repository already had staged changes when `better-review` opened, the ap
 Current behavior:
 
 - `better-review` automatically picks the most recently updated local `opencode` session for the current repository when one exists
+- Press `,` to open Settings and change the persistent default Explain model or startup behavior
 - Press `s` to choose a different context source
 - Press `e` to open the Explain menu
 - Explain scope follows review focus:
   - file focus explains the current file
   - hunk focus explains the current hunk
-- Press `m` to choose a model or keep `Auto`
+- Press `m` to choose a model or keep `Auto` for the current session
 - Press `h` to open Explain history for the current `better-review` session
 - Press `r` to retry the current explanation
 - Press `z` to cancel a running explanation
@@ -136,7 +137,7 @@ Current behavior:
 Implementation details that matter to users:
 
 - Explain runs against a forked `opencode` session, so the source coding session stays clean
-- `Auto` uses the current session model when that information is available
+- `Auto` uses the saved default model when one is configured, otherwise it falls back to the current session model when available
 - Explain history is local to the current `better-review` session
 
 If `opencode` is unavailable, the rest of `better-review` still works normally.
@@ -153,9 +154,10 @@ If `opencode` is unavailable, the rest of `better-review` still works normally.
 | `x` | Reject current file or hunk |
 | `u` | Move current file back to unreviewed |
 | `c` | Open commit prompt |
+| `,` | Open settings |
 | `e` | Open the Explain menu |
 | `s` | Choose Explain context source |
-| `m` | Choose Explain model |
+| `m` | Choose Explain model for the current session |
 | `h` | Open Explain history |
 | `r` | Retry the current Explain run |
 | `z` | Cancel the current Explain run |

@@ -1,6 +1,7 @@
 mod app;
 mod domain;
 mod services;
+mod settings;
 mod ui;
 
 use anyhow::Result;
@@ -18,5 +19,6 @@ mod tests {
         let _ = super::services::parser::parse_git_diff("").expect("empty diff should parse");
         let _ = super::ui::styles::title();
         let _ = super::domain::diff::FileDiff::default();
+        let _ = super::settings::AppSettings::default();
     }
 }
