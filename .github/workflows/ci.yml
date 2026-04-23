@@ -74,8 +74,9 @@ jobs:
 
           report = json.loads(Path("target/coverage-summary.json").read_text())
           files = report["data"][0]["files"]
+          repo_root = Path.cwd().resolve()
           coverage_by_name = {
-              Path(file["filename"]).as_posix().split("/better-review/")[-1]: file["summary"]["lines"]["percent"]
+              Path(file["filename"]).resolve().relative_to(repo_root).as_posix(): file["summary"]["lines"]["percent"]
               for file in files
           }
 
