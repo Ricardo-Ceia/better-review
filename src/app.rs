@@ -310,6 +310,22 @@ struct ReviewCounts {
     rejected: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HomeState {
+    Empty,
+    NeedsReview,
+    ReadyToCommit,
+    NothingAccepted,
+    Busy,
+}
+
+struct HomeContent {
+    headline: &'static str,
+    subhead: &'static str,
+    status: String,
+    key_hints: Vec<(&'static str, &'static str)>,
+}
+
 const BRAND_ICON: &str = "⌕";
 const BRAND_ICON_ALT: &str = "✓";
 const BRAND_WORDMARK: &str = "better-review";
@@ -1200,15 +1216,17 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .split(content);
 
     let counts = app.review_counts();
+    let home_state = home_state(&counts, app.review.files.len(), app.review_busy);
+    let home_content = home_content(home_state, app.status.as_str());
     frame.render_widget(
-        Paragraph::new("Review changes before they become commits")
+        Paragraph::new(home_content.headline)
             .alignment(Alignment::Center)
             .style(styles::accent_bold()),
         sections[1],
     );
 
     frame.render_widget(
-        Paragraph::new("Accept only what belongs in the next commit")
+        Paragraph::new(home_content.subhead)
             .alignment(Alignment::Center)
             .style(styles::muted()),
         sections[2],
@@ -1250,32 +1268,186 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         sections[4],
     );
 
+    draw_home_progress(frame, sections[5], &counts);
+
     frame.render_widget(
-        Paragraph::new(app.status.as_str())
+        Paragraph::new(home_content.status)
             .alignment(Alignment::Center)
             .style(styles::muted())
             .wrap(Wrap { trim: true }),
-        sections[5],
+        sections[6],
     );
 
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Enter", styles::keybind()),
-            Span::styled(" review", styles::muted()),
-            Span::raw("      "),
-            Span::styled("c", styles::keybind()),
-            Span::styled(" commit", styles::muted()),
-            Span::raw("      "),
-            Span::styled("s", styles::keybind()),
-            Span::styled(" settings", styles::muted()),
-            Span::raw("      "),
-            Span::styled("Ctrl+C", styles::keybind()),
-            Span::styled(" quit", styles::muted()),
-        ]))
-        .alignment(Alignment::Center)
-        .style(styles::soft_accent()),
-        sections[6],
+        Paragraph::new(home_key_hint_line(&home_content.key_hints))
+            .alignment(Alignment::Center)
+            .style(styles::soft_accent()),
+        sections[7],
     );
+}
+
+fn home_state(counts: &ReviewCounts, file_count: usize, review_busy: bool) -> HomeState {
+    if review_busy {
+        return HomeState::Busy;
+    }
+    if file_count == 0 {
+        return HomeState::Empty;
+    }
+    if counts.unreviewed > 0 {
+        return HomeState::NeedsReview;
+    }
+    if counts.accepted > 0 {
+        return HomeState::ReadyToCommit;
+    }
+    HomeState::NothingAccepted
+}
+
+fn home_content(state: HomeState, status: &str) -> HomeContent {
+    let (headline, subhead, fallback_status, key_hints) = match state {
+        HomeState::Empty => (
+            "No changes to review",
+            "Run your agent or edit files, then reopen better-review.",
+            "Your worktree is clean from better-review's point of view.",
+            vec![("s", "settings"), ("Ctrl+C", "quit")],
+        ),
+        HomeState::NeedsReview => (
+            "Review changes before they become commits",
+            "Accept only what belongs in the next commit.",
+            "Start with the unreviewed queue.",
+            vec![
+                ("Enter", "review"),
+                ("c", "commit"),
+                ("s", "settings"),
+                ("Ctrl+C", "quit"),
+            ],
+        ),
+        HomeState::ReadyToCommit => (
+            "Accepted changes are ready",
+            "Commit the reviewed set, or return to inspect the diff.",
+            "Only accepted staged changes will be committed.",
+            vec![
+                ("c", "commit"),
+                ("Enter", "review"),
+                ("s", "settings"),
+                ("Ctrl+C", "quit"),
+            ],
+        ),
+        HomeState::NothingAccepted => (
+            "Nothing accepted for commit",
+            "Rejected changes stay in your worktree.",
+            "Review again if any rejected work should be accepted.",
+            vec![("Enter", "review"), ("s", "settings"), ("Ctrl+C", "quit")],
+        ),
+        HomeState::Busy => (
+            "Updating review state",
+            "Applying your latest accept or reject decision.",
+            "Wait for the current review update to finish.",
+            vec![("s", "settings"), ("Ctrl+C", "quit")],
+        ),
+    };
+
+    let status = if status.trim().is_empty() {
+        fallback_status.to_string()
+    } else {
+        status.to_string()
+    };
+
+    HomeContent {
+        headline,
+        subhead,
+        status,
+        key_hints,
+    }
+}
+
+fn home_key_hint_line(hints: &[(&'static str, &'static str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, (key, label)) in hints.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("      "));
+        }
+        spans.push(Span::styled(*key, styles::keybind()));
+        spans.push(Span::styled(format!(" {label}"), styles::muted()));
+    }
+    Line::from(spans)
+}
+
+fn draw_home_progress(frame: &mut ratatui::Frame, area: Rect, counts: &ReviewCounts) {
+    frame.render_widget(
+        Paragraph::new(home_progress_line(counts)).alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn home_progress_line(counts: &ReviewCounts) -> Line<'static> {
+    let total = counts.unreviewed + counts.accepted + counts.rejected;
+    if total == 0 {
+        return Line::from(vec![
+            Span::styled("[", styles::subtle()),
+            Span::styled("────────", styles::subtle()),
+            Span::styled("] ", styles::subtle()),
+            Span::styled("0 / 0 reviewed", styles::subtle()),
+        ]);
+    }
+
+    let reviewed = counts.accepted + counts.rejected;
+    let reviewed_segments = progress_segments(reviewed, total).min(8);
+    let (accepted_segments, rejected_segments) =
+        reviewed_progress_segments(counts, reviewed_segments);
+    let unreviewed_segments = 8 - reviewed_segments;
+
+    let mut spans = vec![Span::styled("[", styles::subtle())];
+    if accepted_segments > 0 {
+        spans.push(Span::styled(
+            "■".repeat(accepted_segments),
+            Style::default().fg(styles::SUCCESS),
+        ));
+    }
+    if rejected_segments > 0 {
+        spans.push(Span::styled(
+            "■".repeat(rejected_segments),
+            Style::default().fg(styles::DANGER),
+        ));
+    }
+    if unreviewed_segments > 0 {
+        spans.push(Span::styled(
+            "□".repeat(unreviewed_segments),
+            styles::subtle(),
+        ));
+    }
+    spans.push(Span::styled("] ", styles::subtle()));
+    spans.push(Span::styled(
+        format!("{} / {total} reviewed", counts.accepted + counts.rejected),
+        styles::muted(),
+    ));
+    Line::from(spans)
+}
+
+fn progress_segments(count: usize, total: usize) -> usize {
+    if count == 0 || total == 0 {
+        return 0;
+    }
+    ((count * 8) + total - 1) / total
+}
+
+fn reviewed_progress_segments(counts: &ReviewCounts, reviewed_segments: usize) -> (usize, usize) {
+    let reviewed = counts.accepted + counts.rejected;
+    if reviewed == 0 || reviewed_segments == 0 {
+        return (0, 0);
+    }
+
+    let mut accepted_segments = counts.accepted * reviewed_segments / reviewed;
+    if counts.accepted > 0 && accepted_segments == 0 {
+        accepted_segments = 1;
+    }
+
+    let mut rejected_segments = reviewed_segments.saturating_sub(accepted_segments);
+    if counts.rejected > 0 && rejected_segments == 0 && accepted_segments > 0 {
+        accepted_segments -= 1;
+        rejected_segments = 1;
+    }
+
+    (accepted_segments, rejected_segments)
 }
 
 fn home_count_span(
@@ -3161,6 +3333,99 @@ mod tests {
 
         let text = app.status.clone();
         assert!(text.contains("nothing to commit"));
+    }
+
+    #[test]
+    fn home_state_matches_review_progress() {
+        assert_eq!(
+            home_state(&ReviewCounts::default(), 0, false),
+            HomeState::Empty
+        );
+        assert_eq!(
+            home_state(&ReviewCounts::default(), 3, true),
+            HomeState::Busy
+        );
+        assert_eq!(
+            home_state(
+                &ReviewCounts {
+                    unreviewed: 1,
+                    accepted: 1,
+                    rejected: 0,
+                },
+                2,
+                false,
+            ),
+            HomeState::NeedsReview
+        );
+        assert_eq!(
+            home_state(
+                &ReviewCounts {
+                    unreviewed: 0,
+                    accepted: 1,
+                    rejected: 1,
+                },
+                2,
+                false,
+            ),
+            HomeState::ReadyToCommit
+        );
+        assert_eq!(
+            home_state(
+                &ReviewCounts {
+                    unreviewed: 0,
+                    accepted: 0,
+                    rejected: 2,
+                },
+                2,
+                false,
+            ),
+            HomeState::NothingAccepted
+        );
+    }
+
+    #[test]
+    fn home_content_and_key_hints_follow_state() {
+        let empty = home_content(HomeState::Empty, "");
+        assert_eq!(empty.headline, "No changes to review");
+        assert!(empty.status.contains("worktree is clean"));
+        assert_eq!(empty.key_hints, vec![("s", "settings"), ("Ctrl+C", "quit")]);
+
+        let ready = home_content(HomeState::ReadyToCommit, "Accepted hunk.");
+        assert_eq!(ready.headline, "Accepted changes are ready");
+        assert_eq!(ready.status, "Accepted hunk.");
+        assert_eq!(ready.key_hints[0], ("c", "commit"));
+
+        let text = home_key_hint_line(&ready.key_hints)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.starts_with("c commit"));
+        assert!(text.contains("Enter review"));
+    }
+
+    #[test]
+    fn home_progress_line_represents_reviewed_counts() {
+        let empty = home_progress_line(&ReviewCounts::default())
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(empty, "[────────] 0 / 0 reviewed");
+
+        let mixed_counts = ReviewCounts {
+            unreviewed: 2,
+            accepted: 1,
+            rejected: 1,
+        };
+        let mixed = home_progress_line(&mixed_counts)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(mixed, "[■■■■□□□□] 2 / 4 reviewed");
+        assert_eq!(progress_segments(2, 4), 4);
+        assert_eq!(reviewed_progress_segments(&mixed_counts, 4), (2, 2));
     }
 
     #[test]
