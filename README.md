@@ -103,7 +103,7 @@ Run the installed binary:
 better-review
 ```
 
-If you launch the app before changes exist, or if new changes arrive after the app starts, reopen `better-review` to load the latest worktree state.
+If you launch the app before changes exist, or if new changes arrive after the app starts, press `r` to refresh the latest worktree state.
 
 ## Review Model
 
@@ -124,14 +124,14 @@ Current behavior:
 
 - `better-review` automatically picks the most recently updated local `opencode` session for the current repository when one exists
 - Press `s` to open Settings and change the persistent default Explain model
-- Press `c` in the Explain menu to choose a different context source
+- Press `o` in the Explain menu to choose a different context source
 - Press `e` to open the Explain menu
 - Explain scope follows review focus:
   - file focus explains the current file
   - hunk focus explains the current hunk
 - Press `m` to choose a model or keep `Auto` for the current session
 - Press `h` to open Explain history for the current `better-review` session
-- Press `r` to retry the current explanation
+- Press `t` to retry the current explanation
 - Press `z` to cancel a running explanation
 
 Implementation details that matter to users:
@@ -150,16 +150,17 @@ If `opencode` is unavailable, the rest of `better-review` still works normally.
 | `Esc` | Go back, close a modal, or return to home |
 | `j` / `k` or arrows | Move through files, hunks, or menus |
 | `Tab` | Cycle hunks in the current file |
+| `r` | Refresh review changes from the worktree |
 | `y` | Accept current file or hunk |
 | `x` | Reject current file or hunk |
 | `u` | Move current file back to unreviewed |
 | `c` | Open commit prompt |
 | `s` | Open settings |
 | `e` | Open the Explain menu |
-| `c` | Choose Explain context source from Explain menu |
+| `o` | Choose Explain context source from Explain menu |
 | `m` | Choose Explain model for the current session |
 | `h` | Open Explain history |
-| `r` | Retry the current Explain run |
+| `t` | Retry the current Explain run |
 | `z` | Cancel the current Explain run |
 | `Ctrl+C` | Quit |
 

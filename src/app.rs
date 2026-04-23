@@ -409,6 +409,26 @@ async fn refresh_review_files(app: &mut App) -> Result<()> {
     Ok(())
 }
 
+async fn refresh_review_files_for_user(app: &mut App) -> Result<()> {
+    if app.review_busy {
+        app.status = "Wait for the current review update to finish.".to_string();
+        return Ok(());
+    }
+
+    let was_home = app.screen == Screen::Home;
+    refresh_review_files(app).await?;
+    if was_home && !app.review.files.is_empty() {
+        app.screen = Screen::Home;
+    }
+
+    app.status = if app.review.files.is_empty() {
+        "No changes after refresh.".to_string()
+    } else {
+        "Refreshed review queue.".to_string()
+    };
+    Ok(())
+}
+
 async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
     let mut app = App::new().await?;
     let mut commit_message = new_commit_message_input();
@@ -468,7 +488,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                                 }
                                 Err(error) => {
                                     app.status =
-                                        format!("Explain failed: {error}. Press r to retry.");
+                                        format!("Explain failed: {error}. Press t to retry.");
                                     run.status = ExplainRunStatus::Failed;
                                     run.error = Some(error);
                                     run.result = None;
@@ -549,12 +569,17 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                     if key.code == KeyCode::Enter && app.screen == Screen::Home {
                         if app.review.files.is_empty() {
                             app.status =
-                                "No reviewable changes yet. Run your coding agent, then reopen better-review."
+                                "No reviewable changes yet. Run your agent, then press r to refresh."
                                     .to_string();
                         } else {
                             app.screen = Screen::Review;
                             app.status = "Review workspace ready.".to_string();
                         }
+                        continue;
+                    }
+
+                    if key.code == KeyCode::Char('r') {
+                        refresh_review_files_for_user(&mut app).await?;
                         continue;
                     }
 
@@ -736,7 +761,7 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.why_this.return_to_menu = false;
             open_explain_history(app)
         }
-        KeyCode::Char('r') => retry_current_explain(app).await?,
+        KeyCode::Char('t') => retry_current_explain(app).await?,
         KeyCode::Char('z') => cancel_current_explain(app),
         KeyCode::Char('m') => {
             app.why_this.return_to_menu = false;
@@ -762,7 +787,7 @@ async fn handle_explain_menu_key(app: &mut App, key: KeyEvent) -> Result<()> {
             }
             if app.active_session().is_none() {
                 app.status =
-                    "No context source is linked to this repository. Press c to choose one."
+                    "No context source is linked to this repository. Press o to choose one."
                         .to_string();
                 return Ok(());
             }
@@ -775,7 +800,7 @@ async fn handle_explain_menu_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.why_this.return_to_menu = false;
             request_explain(app).await?;
         }
-        KeyCode::Char('c') => {
+        KeyCode::Char('o') => {
             app.why_this.return_to_menu = true;
             open_session_picker(app)
         }
@@ -787,7 +812,7 @@ async fn handle_explain_menu_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.why_this.return_to_menu = true;
             open_explain_history(app)
         }
-        KeyCode::Char('r') => retry_current_explain(app).await?,
+        KeyCode::Char('t') => retry_current_explain(app).await?,
         KeyCode::Char('z') => cancel_current_explain(app),
         _ => {}
     }
@@ -828,7 +853,7 @@ fn handle_explain_history_key(app: &mut App, key: KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => move_explain_history_cursor(app, -1),
         KeyCode::Down | KeyCode::Char('j') => move_explain_history_cursor(app, 1),
         KeyCode::Enter => focus_history_run(app),
-        KeyCode::Char('r') => retry_history_run(app),
+        KeyCode::Char('t') => retry_history_run(app),
         KeyCode::Char('z') => cancel_history_run(app),
         KeyCode::Backspace | KeyCode::Delete => clear_history_run(app),
         _ => {}
@@ -1013,7 +1038,7 @@ async fn request_explain(app: &mut App) -> Result<()> {
     };
     let Some(session) = app.active_session().cloned() else {
         app.status =
-            "No context source is linked to this repository. Press c to choose one.".to_string();
+            "No context source is linked to this repository. Press o to choose one.".to_string();
         return Ok(());
     };
 
@@ -1271,9 +1296,9 @@ fn home_content(state: HomeState, status: &str) -> HomeContent {
     let (title, detail, fallback_status, key_hints) = match state {
         HomeState::Empty => (
             "No changes",
-            "Run your agent, then reopen better-review.",
+            "Run your agent, then press r to refresh.",
             Some("Worktree is clean."),
-            vec![("s", "settings"), ("Ctrl+C", "quit")],
+            vec![("r", "refresh"), ("s", "settings"), ("Ctrl+C", "quit")],
         ),
         HomeState::NeedsReview => (
             "Review queue",
@@ -1281,6 +1306,7 @@ fn home_content(state: HomeState, status: &str) -> HomeContent {
             None,
             vec![
                 ("Enter", "review"),
+                ("r", "refresh"),
                 ("c", "commit"),
                 ("s", "settings"),
                 ("Ctrl+C", "quit"),
@@ -1293,6 +1319,7 @@ fn home_content(state: HomeState, status: &str) -> HomeContent {
             vec![
                 ("c", "commit"),
                 ("Enter", "review"),
+                ("r", "refresh"),
                 ("s", "settings"),
                 ("Ctrl+C", "quit"),
             ],
@@ -1301,7 +1328,12 @@ fn home_content(state: HomeState, status: &str) -> HomeContent {
             "Nothing accepted",
             "Rejected changes stay in your worktree.",
             None,
-            vec![("Enter", "review"), ("s", "settings"), ("Ctrl+C", "quit")],
+            vec![
+                ("Enter", "review"),
+                ("r", "refresh"),
+                ("s", "settings"),
+                ("Ctrl+C", "quit"),
+            ],
         ),
         HomeState::Busy => (
             "Updating review",
@@ -2135,7 +2167,7 @@ fn explain_menu_lines(app: &App) -> Vec<Line<'static>> {
             Span::styled(" run explain", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled("c", styles::keybind()),
+            Span::styled("o", styles::keybind()),
             Span::styled(" choose context", styles::muted()),
         ]),
         Line::from(vec![
@@ -2147,7 +2179,7 @@ fn explain_menu_lines(app: &App) -> Vec<Line<'static>> {
             Span::styled(" open history", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled("r", styles::keybind()),
+            Span::styled("t", styles::keybind()),
             Span::styled(" retry current run", styles::muted()),
         ]),
         Line::from(vec![
@@ -2193,7 +2225,7 @@ fn explain_empty_lines() -> Vec<Line<'static>> {
             Span::styled("choose model", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled(" c ", styles::keybind()),
+            Span::styled(" o ", styles::keybind()),
             Span::styled("choose context source", styles::muted()),
         ]),
         Line::from(vec![
@@ -2205,7 +2237,7 @@ fn explain_empty_lines() -> Vec<Line<'static>> {
             Span::styled("cancel current run", styles::muted()),
         ]),
         Line::from(vec![
-            Span::styled(" r ", styles::keybind()),
+            Span::styled(" t ", styles::keybind()),
             Span::styled("retry current run", styles::muted()),
         ]),
         Line::from(Span::raw("")),
@@ -2230,7 +2262,7 @@ fn explain_footer_lines(app: &App) -> Vec<Line<'static>> {
             styles::muted(),
         ),
         Span::raw("  "),
-        Span::styled("r", styles::keybind()),
+        Span::styled("t", styles::keybind()),
         Span::styled(" retry", styles::muted()),
         Span::raw("  "),
         Span::styled("z", styles::keybind()),
@@ -2267,7 +2299,7 @@ fn explain_history_lines(app: &App) -> Vec<Line<'static>> {
         Span::styled("Enter", styles::keybind()),
         Span::styled(" focus", styles::muted()),
         Span::raw("  "),
-        Span::styled("r", styles::keybind()),
+        Span::styled("t", styles::keybind()),
         Span::styled(" retry", styles::muted()),
         Span::raw("  "),
         Span::styled("z", styles::keybind()),
@@ -2360,7 +2392,7 @@ fn render_explain_run_lines(run: &ExplainRun, animation: &AnimatedTextState) -> 
                 lines.push(Line::from(Span::raw(error.clone())));
             }
             lines.push(Line::from(Span::styled(
-                "Press r to retry, or press m to switch models.",
+                "Press t to retry, or press m to switch models.",
                 styles::muted(),
             )));
         }
@@ -3284,6 +3316,19 @@ mod tests {
         assert!(app.status.contains("there are no reviewable changes"));
     }
 
+    #[tokio::test]
+    async fn user_refresh_blocks_while_review_update_is_busy() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.review_busy = true;
+
+        refresh_review_files_for_user(&mut app).await.unwrap();
+
+        assert!(app.status.contains("Wait for the current review update"));
+    }
+
     #[test]
     fn draw_home_includes_status_message() {
         let mut app = sample_app(ReviewUiState::default());
@@ -3346,19 +3391,21 @@ mod tests {
     fn home_content_and_key_hints_follow_state() {
         let empty = home_content(HomeState::Empty, "");
         assert_eq!(empty.title, "No changes");
-        assert_eq!(empty.detail, "Run your agent, then reopen better-review.");
+        assert_eq!(empty.detail, "Run your agent, then press r to refresh.");
         assert_eq!(empty.status, Some("Worktree is clean.".to_string()));
-        assert_eq!(empty.key_hints, vec![("s", "settings"), ("Ctrl+C", "quit")]);
+        assert_eq!(empty.key_hints[0], ("r", "refresh"));
 
         let queue = home_content(HomeState::NeedsReview, HOME_DEFAULT_STATUS);
         assert_eq!(queue.title, "Review queue");
         assert_eq!(queue.detail, "");
         assert_eq!(queue.status, None);
+        assert!(queue.key_hints.contains(&("r", "refresh")));
 
         let ready = home_content(HomeState::ReadyToCommit, "Accepted hunk.");
         assert_eq!(ready.title, "Ready to commit");
         assert_eq!(ready.status, Some("Accepted hunk.".to_string()));
         assert_eq!(ready.key_hints[0], ("c", "commit"));
+        assert!(ready.key_hints.contains(&("r", "refresh")));
 
         let text = home_key_hint_line(&ready.key_hints)
             .spans
@@ -3367,6 +3414,7 @@ mod tests {
             .collect::<String>();
         assert!(text.starts_with("c commit"));
         assert!(text.contains("Enter review"));
+        assert!(text.contains("r refresh"));
         assert!(!should_show_home_status(HOME_DEFAULT_STATUS));
         assert!(should_show_home_status("Accepted hunk."));
     }
@@ -3934,8 +3982,9 @@ mod tests {
                 || text.contains("Context Main Session (ses_1)")
         );
         assert!(text.contains("Enter run explain"));
-        assert!(text.contains("c choose context"));
+        assert!(text.contains("o choose context"));
         assert!(text.contains("m choose model"));
+        assert!(text.contains("t retry current run"));
     }
 
     #[test]
