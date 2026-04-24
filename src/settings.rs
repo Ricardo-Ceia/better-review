@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -108,10 +108,6 @@ impl SettingsStore {
             .with_context(|| format!("failed to write {}", self.path.display()))
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     #[cfg(test)]
     pub(crate) fn from_path(path: PathBuf) -> Self {
         Self { path }
@@ -157,8 +153,7 @@ mod tests {
         store.save(&settings).unwrap();
 
         assert_eq!(store.load().unwrap(), settings);
-        assert!(store.path().exists());
-        assert_eq!(store.path(), path.as_path());
+        assert!(path.exists());
     }
 
     #[test]

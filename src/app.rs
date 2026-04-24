@@ -1035,10 +1035,7 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
             app.overlay = Overlay::None;
-            app.status = format!(
-                "Closed settings. Config: {}",
-                app.settings_store.path().display()
-            );
+            app.status = "Closed settings.".to_string();
         }
         KeyCode::Up => {
             app.settings_cursor = app.settings_cursor.saturating_sub(1);
@@ -2157,7 +2154,7 @@ fn draw_saved_model_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn draw_keybinding_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let modal = centered_rect(70, 62, area);
+    let modal = centered_rect(62, 58, area);
     frame.render_widget(Clear, modal);
     frame.render_widget(
         Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
@@ -2169,20 +2166,27 @@ fn draw_keybinding_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     });
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(4),
+            Constraint::Length(2),
+        ])
         .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Keybindings", styles::title()),
+            Span::styled("  Each command needs its own letter.", styles::muted()),
+        ]))
+        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        sections[0],
+    );
 
     let rows = keybinding_picker_items(app);
     let mut state = ListState::default().with_selected(Some(app.keybinding_cursor));
     frame.render_stateful_widget(
-        List::new(rows).block(
-            Block::default()
-                .title(Line::from(Span::styled("Keybindings", styles::title())))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
-                .style(Style::default().bg(styles::SURFACE_RAISED)),
-        ),
-        sections[0],
+        List::new(rows).block(Block::default().style(Style::default().bg(styles::SURFACE_RAISED))),
+        sections[1],
         &mut state,
     );
 
@@ -2215,15 +2219,8 @@ fn draw_keybinding_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         ])
     };
     frame.render_widget(
-        Paragraph::new(vec![
-            help,
-            Line::from(Span::styled(
-                "Each letter can be assigned to only one command.",
-                styles::subtle(),
-            )),
-        ])
-        .style(Style::default().bg(styles::SURFACE_RAISED)),
-        sections[1],
+        Paragraph::new(help).style(Style::default().bg(styles::SURFACE_RAISED)),
+        sections[2],
     );
 }
 
@@ -2244,14 +2241,14 @@ fn keybinding_picker_items(app: &App) -> Vec<ListItem<'static>> {
                 Style::default().fg(styles::TEXT_MUTED)
             };
             let marker = if capturing {
-                "*"
+                "?"
             } else if selected {
                 ">"
             } else {
                 " "
             };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{marker} {:<26}", command_label(command)), style),
+                Span::styled(format!("{marker} {:<24}", command_label(command)), style),
                 Span::styled(" ", style),
                 Span::styled(
                     command_binding(&app.settings.keybindings, command).to_string(),
@@ -2910,10 +2907,7 @@ fn open_explain_history(app: &mut App) {
 fn open_settings(app: &mut App) {
     app.overlay = Overlay::Settings;
     app.settings_cursor = 0;
-    app.status = format!(
-        "Settings loaded from {}.",
-        app.settings_store.path().display()
-    );
+    app.status = "Settings opened.".to_string();
 }
 
 fn save_settings(app: &mut App) {
@@ -3038,14 +3032,10 @@ fn selected_keybinding_command(app: &App) -> KeybindingCommand {
 }
 
 fn settings_lines(app: &App) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        format!("Config: {}", app.settings_store.path().display()),
-        styles::soft_accent(),
-    ))];
-    lines.push(Line::from(Span::raw("")));
+    let mut lines = Vec::new();
 
     for (index, row) in SETTINGS_ROWS.iter().copied().enumerate() {
-        let (label, value, hint) = settings_row_content(app, row);
+        let (label, value) = settings_row_content(app, row);
         let selected = index == app.settings_cursor;
         let row_style = if selected {
             Style::default()
@@ -3057,31 +3047,23 @@ fn settings_lines(app: &App) -> Vec<Line<'static>> {
         };
         let marker = if selected { ">" } else { " " };
         lines.push(Line::from(vec![
-            Span::styled(format!("{marker} {label:<15}"), row_style),
+            Span::styled(format!("{marker} {label:<18}"), row_style),
             Span::styled(value, row_style),
         ]));
-        if selected {
-            lines.push(Line::from(Span::styled(
-                format!("  {hint}"),
-                styles::muted(),
-            )));
-        }
     }
 
     lines
 }
 
-fn settings_row_content(app: &App, row: SettingsRow) -> (&'static str, String, &'static str) {
+fn settings_row_content(app: &App, row: SettingsRow) -> (&'static str, String) {
     match row {
         SettingsRow::DefaultExplainModel => (
-            "Default Explain model",
+            "Default model",
             saved_model_label(&app.settings.explain.default_model),
-            "Press Enter to choose the saved default model.",
         ),
         SettingsRow::Keybindings => (
             "Keybindings",
-            format!("{} commands", KEYBINDING_COMMANDS.len()),
-            "Press Enter to customize letter keybindings.",
+            format!("{} shortcuts", KEYBINDING_COMMANDS.len()),
         ),
     }
 }
@@ -3286,7 +3268,7 @@ fn draw_commit_prompt(
 }
 
 fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let modal = centered_rect(68, 52, area);
+    let modal = centered_rect(58, 36, area);
     frame.render_widget(Clear, modal);
     frame.render_widget(
         Block::default().style(Style::default().bg(styles::SURFACE_RAISED)),
@@ -3298,22 +3280,28 @@ fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     });
     let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(4),
+            Constraint::Length(2),
+        ])
         .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled("Settings", styles::title())),
+            Line::from(Span::styled("Saved preferences", styles::muted())),
+        ])
+        .style(Style::default().bg(styles::SURFACE_RAISED)),
+        sections[0],
+    );
 
     let rows = settings_lines(app);
     frame.render_widget(
         Paragraph::new(rows)
-            .block(
-                Block::default()
-                    .title(Line::from(Span::styled("Settings", styles::title())))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(styles::ACCENT_BRIGHT))
-                    .style(Style::default().bg(styles::SURFACE_RAISED)),
-            )
             .style(Style::default().bg(styles::SURFACE_RAISED))
             .wrap(Wrap { trim: true }),
-        sections[0],
+        sections[1],
     );
 
     frame.render_widget(
@@ -3335,7 +3323,7 @@ fn draw_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled(" close", styles::muted()),
         ]))
         .style(Style::default().bg(styles::SURFACE_RAISED)),
-        sections[1],
+        sections[2],
     );
 }
 
@@ -4338,7 +4326,33 @@ mod tests {
         open_settings(&mut app);
 
         assert_eq!(app.overlay, Overlay::Settings);
-        assert!(app.status.contains("Settings loaded from"));
+        assert_eq!(app.status, "Settings opened.");
+    }
+
+    #[test]
+    fn settings_lines_show_stable_options_without_dynamic_help() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.settings_cursor = 1;
+
+        let text = settings_lines(&app)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Default model"));
+        assert!(text.contains("Keybindings"));
+        assert!(!text.contains("Press Enter"));
+        assert!(!text.contains("Enter edits"));
+        assert!(!text.contains("Config:"));
     }
 
     #[test]
