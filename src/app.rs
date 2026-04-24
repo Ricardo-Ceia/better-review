@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::domain::diff::{DiffLineKind, FileDiff, ReviewStatus};
-use crate::services::git::GitService;
+use crate::services::git::{GitService, PushFailure};
 use crate::services::opencode::{
     OpencodeService, OpencodeSession, WhyAnswer, WhyRiskLevel, WhyTarget, why_target_for_file,
     why_target_for_hunk,
@@ -67,6 +67,7 @@ struct App {
     keybinding_cursor: usize,
     keybinding_capture: Option<KeybindingCommand>,
     publish_cursor: usize,
+    publish_busy: bool,
     saved_model_cursor: usize,
     session_state: SessionUiState,
     why_this: WhyThisUiState,
@@ -134,6 +135,9 @@ enum Message {
     },
     ModelList {
         result: Result<Vec<String>, String>,
+    },
+    Publish {
+        result: Result<(), PushFailure>,
     },
 }
 
@@ -215,6 +219,7 @@ impl App {
             keybinding_cursor: 0,
             keybinding_capture: None,
             publish_cursor: 0,
+            publish_busy: false,
             saved_model_cursor: 0,
             session_state: SessionUiState::default(),
             why_this: WhyThisUiState::default(),
@@ -477,9 +482,26 @@ async fn submit_commit_message(
     Ok(())
 }
 
-async fn push_reviewed_changes(app: &mut App) {
-    let token = app.settings.github.token.as_deref();
-    match app.git.push_current_branch(token).await {
+fn push_reviewed_changes(app: &mut App) {
+    if app.publish_busy {
+        app.status = "Publish is already running.".to_string();
+        return;
+    }
+
+    let git = app.git.clone();
+    let token = app.settings.github.token.clone();
+    let tx = app.tx.clone();
+    app.publish_busy = true;
+    app.status = "Publishing reviewed commit...".to_string();
+    tokio::spawn(async move {
+        let result = git.push_current_branch(token.as_deref()).await;
+        let _ = tx.send(Message::Publish { result });
+    });
+}
+
+fn handle_publish_result(app: &mut App, result: Result<(), PushFailure>) {
+    app.publish_busy = false;
+    match result {
         Ok(()) => {
             app.overlay = Overlay::None;
             app.status = "Pushed reviewed commit to GitHub.".to_string();
@@ -633,6 +655,9 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                         }
                     }
                 }
+                Message::Publish { result } => {
+                    handle_publish_result(&mut app, result);
+                }
             }
         }
 
@@ -659,7 +684,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                     }
                 },
                 Overlay::GitHubTokenPrompt => handle_github_token_prompt_key(&mut app, key),
-                Overlay::PublishPrompt => handle_publish_prompt_key(&mut app, key).await,
+                Overlay::PublishPrompt => handle_publish_prompt_key(&mut app, key),
                 Overlay::Settings => handle_settings_key(&mut app, key),
                 Overlay::SettingsModelPicker => handle_saved_model_picker_key(&mut app, key),
                 Overlay::KeybindingPicker => handle_keybinding_picker_key(&mut app, key),
@@ -1137,7 +1162,15 @@ fn handle_github_token_prompt_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-async fn handle_publish_prompt_key(app: &mut App, key: KeyEvent) {
+fn handle_publish_prompt_key(app: &mut App, key: KeyEvent) {
+    if app.publish_busy {
+        match key.code {
+            KeyCode::Esc => app.status = "Publish is still running.".to_string(),
+            _ => {}
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Esc => {
             app.overlay = Overlay::None;
@@ -1158,7 +1191,7 @@ async fn handle_publish_prompt_key(app: &mut App, key: KeyEvent) {
             app.publish_cursor += 1;
         }
         KeyCode::Enter => match selected_publish_action(app) {
-            PublishAction::PushCurrentBranch => push_reviewed_changes(app).await,
+            PublishAction::PushCurrentBranch => push_reviewed_changes(app),
             PublishAction::NotNow => {
                 app.overlay = Overlay::None;
                 app.status = "Publish skipped. Commit remains local.".to_string();
@@ -3465,6 +3498,7 @@ fn draw_publish_prompt(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(3),
+            Constraint::Length(3),
             Constraint::Length(2),
         ])
         .split(inner);
@@ -3490,6 +3524,13 @@ fn draw_publish_prompt(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     );
 
     frame.render_widget(
+        Paragraph::new(publish_status_line(app))
+            .style(Style::default().bg(styles::SURFACE_RAISED))
+            .wrap(Wrap { trim: true }),
+        sections[2],
+    );
+
+    frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 format!(
@@ -3508,8 +3549,26 @@ fn draw_publish_prompt(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled(" later", styles::muted()),
         ]))
         .style(Style::default().bg(styles::SURFACE_RAISED)),
-        sections[2],
+        sections[3],
     );
+}
+
+fn publish_status_line(app: &App) -> Line<'static> {
+    if app.publish_busy {
+        return Line::from(vec![
+            Span::styled("Publishing", styles::keybind()),
+            Span::styled("  pushing current branch...", styles::muted()),
+        ]);
+    }
+
+    if app.status.trim().is_empty() {
+        return Line::from(Span::styled(
+            "Push uses your GitHub token from Settings when needed.",
+            styles::muted(),
+        ));
+    }
+
+    Line::from(Span::styled(app.status.clone(), styles::muted()))
 }
 
 fn publish_prompt_items(app: &App) -> Vec<ListItem<'static>> {
@@ -3519,7 +3578,7 @@ fn publish_prompt_items(app: &App) -> Vec<ListItem<'static>> {
         .enumerate()
         .map(|(index, action)| {
             let selected = index == app.publish_cursor;
-            let style = if selected {
+            let style = if selected && !app.publish_busy {
                 Style::default()
                     .fg(styles::TEXT_PRIMARY)
                     .bg(styles::ACCENT_DIM)
@@ -3937,6 +3996,7 @@ mod tests {
             keybinding_cursor: 0,
             keybinding_capture: None,
             publish_cursor: 0,
+            publish_busy: false,
             saved_model_cursor: 0,
             session_state: SessionUiState::default(),
             why_this: WhyThisUiState::default(),
@@ -4658,6 +4718,39 @@ mod tests {
                 .join(" ")
                 .contains("Saved")
         );
+    }
+
+    #[test]
+    fn publish_status_line_shows_running_and_failure_messages() {
+        let mut app = sample_app(ReviewUiState {
+            files: vec![sample_file()],
+            ..ReviewUiState::default()
+        });
+        app.publish_busy = true;
+
+        let running = publish_status_line(&app)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(running.contains("Publishing"));
+
+        handle_publish_result(
+            &mut app,
+            Err(PushFailure {
+                kind: crate::services::git::PushFailureKind::Authentication,
+                message: "GitHub authentication failed. Check the token in Settings, then try publishing again."
+                    .to_string(),
+            }),
+        );
+
+        assert!(!app.publish_busy);
+        let failed = publish_status_line(&app)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(failed.contains("GitHub authentication failed"));
     }
 
     #[test]
