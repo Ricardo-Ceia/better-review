@@ -1,17 +1,17 @@
 use ratatui_core::style::{Color, Modifier, Style};
 
-pub const BASE_BG: Color = Color::Rgb(16, 18, 19);
-pub const SURFACE: Color = Color::Rgb(20, 23, 23);
-pub const SURFACE_RAISED: Color = Color::Rgb(28, 32, 31);
-pub const BORDER_MUTED: Color = Color::Rgb(58, 65, 63);
-pub const TEXT_PRIMARY: Color = Color::Rgb(232, 228, 219);
-pub const TEXT_MUTED: Color = Color::Rgb(167, 163, 154);
-pub const TEXT_SUBTLE: Color = Color::Rgb(109, 107, 101);
-pub const ACCENT: Color = Color::Rgb(96, 170, 150);
-pub const ACCENT_BRIGHT: Color = Color::Rgb(165, 223, 206);
-pub const ACCENT_DIM: Color = Color::Rgb(54, 90, 81);
-pub const SUCCESS: Color = Color::Rgb(126, 176, 147);
-pub const DANGER: Color = Color::Rgb(172, 116, 118);
+pub const BASE_BG: Color = Color::Rgb(0, 0, 0);
+pub const SURFACE: Color = Color::Rgb(10, 8, 18);
+pub const SURFACE_RAISED: Color = Color::Rgb(21, 16, 39);
+pub const BORDER_MUTED: Color = Color::Rgb(47, 47, 47);
+pub const TEXT_PRIMARY: Color = Color::Rgb(205, 205, 205);
+pub const TEXT_MUTED: Color = Color::Rgb(133, 133, 133);
+pub const TEXT_SUBTLE: Color = Color::Rgb(85, 85, 85);
+pub const ACCENT: Color = Color::Rgb(105, 48, 199);
+pub const ACCENT_BRIGHT: Color = Color::Rgb(221, 181, 248);
+pub const ACCENT_DIM: Color = Color::Rgb(58, 47, 102);
+pub const SUCCESS: Color = Color::Rgb(184, 184, 184);
+pub const DANGER: Color = Color::Rgb(147, 147, 147);
 
 pub fn title() -> Style {
     Style::default()
@@ -20,15 +20,11 @@ pub fn title() -> Style {
 }
 
 pub fn accent_bold() -> Style {
-    Style::default()
-        .fg(ACCENT_BRIGHT)
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
 }
 
 pub fn keybind() -> Style {
-    Style::default()
-        .fg(ACCENT_BRIGHT)
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
 }
 
 pub fn soft_accent() -> Style {
@@ -61,14 +57,14 @@ mod tests {
     #[test]
     fn accent_bold_style_matches_palette() {
         let style = accent_bold();
-        assert_eq!(style.fg, Some(ACCENT_BRIGHT));
+        assert_eq!(style.fg, Some(ACCENT));
         assert_bold(style);
     }
 
     #[test]
     fn keybind_style_matches_palette() {
         let style = keybind();
-        assert_eq!(style.fg, Some(ACCENT_BRIGHT));
+        assert_eq!(style.fg, Some(ACCENT));
         assert_bold(style);
     }
 

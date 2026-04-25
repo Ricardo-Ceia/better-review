@@ -395,20 +395,15 @@ struct HomeContent {
     title: &'static str,
     detail: &'static str,
     status: Option<String>,
-    key_hints: Vec<(String, &'static str)>,
 }
 
-const BRAND_ICON: &str = "⌕";
+const BRAND_ICON: &str = "›";
 const BRAND_ICON_ALT: &str = "✓";
 const BRAND_WORDMARK: &str = "better-review";
+const VERSION_LABEL: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const MODEL_CACHE_TTL: Duration = Duration::from_secs(180);
 const HOME_DEFAULT_STATUS: &str =
     "Run your coding agent elsewhere, then open better-review to review changes.";
-const HOME_CASCADE_GLYPHS: &[char] = &[
-    '0', '1', 'r', 'v', 'w', 'y', 'x', '[', ']', '{', '}', '(', ')', '/', '\\', '|', '+', '-', '*',
-    '=', ':', '.', '<', '>',
-];
-const HOME_CASCADE_AMBIENT_GLYPHS: &[char] = &['.', ':', '`'];
 
 fn brand_lockup_width() -> u16 {
     BRAND_ICON.chars().count() as u16 + 2 + BRAND_WORDMARK.chars().count() as u16
@@ -1492,6 +1487,24 @@ async fn request_explain_with_target(
 
 fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
     let size = frame.area();
+    if app.screen == Screen::Home {
+        draw_home(frame, size, app);
+        match app.overlay {
+            Overlay::CommitPrompt => draw_commit_prompt(frame, size, app, commit_message),
+            Overlay::GitHubTokenPrompt => draw_github_token_prompt(frame, size, app),
+            Overlay::PublishPrompt => draw_publish_prompt(frame, size, app),
+            Overlay::Settings => draw_settings(frame, size, app),
+            Overlay::SettingsModelPicker => draw_saved_model_picker(frame, size, app),
+            Overlay::KeybindingPicker => draw_keybinding_picker(frame, size, app),
+            Overlay::ExplainMenu => draw_explain_menu(frame, size, app),
+            Overlay::SessionPicker => draw_session_picker(frame, size, app),
+            Overlay::ModelPicker => draw_model_picker(frame, size, app),
+            Overlay::ExplainHistory => draw_explain_history(frame, size, app),
+            Overlay::None => {}
+        }
+        return;
+    }
+
     let header_height = if app.screen == Screen::Review { 1 } else { 2 };
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1521,19 +1534,38 @@ fn draw(frame: &mut ratatui::Frame, app: &App, commit_message: &TextArea<'_>) {
 
 fn draw_top_bar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     if app.screen == Screen::Home {
-        render_brand_lockup(frame, area, app, Alignment::Center);
-        if area.width > 0 {
-            frame.render_widget(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(styles::BORDER_MUTED)),
-                area,
-            );
-        }
+        render_home_top_bar(frame, area, app);
         return;
     }
 
     render_brand_lockup(frame, area, app, Alignment::Center);
+}
+
+fn render_home_top_bar(frame: &mut ratatui::Frame, area: Rect, _app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let pill_width = VERSION_LABEL.chars().count() as u16 + 6;
+    if area.width > pill_width + 4 && area.height >= 3 {
+        let pill = Rect::new(
+            area.x + area.width.saturating_sub(pill_width + 2),
+            area.y,
+            pill_width,
+            3,
+        );
+        frame.render_widget(
+            Paragraph::new(VERSION_LABEL)
+                .alignment(Alignment::Center)
+                .style(styles::accent_bold())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(styles::ACCENT_DIM)),
+                ),
+            pill,
+        );
+    }
 }
 
 fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -1542,76 +1574,47 @@ fn draw_home(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         area,
     );
 
-    let inner = area.inner(ratatui::layout::Margin {
-        horizontal: 2,
-        vertical: 1,
-    });
-    let card = home_card_rect(inner);
+    let inner = area.inner(ratatui::layout::Margin::new(4, 2));
     let counts = app.review_counts();
     let home_state = home_state(&counts, app.review.files.len(), app.review_busy);
     let home_content = home_content(app, home_state, app.status.as_str());
-    draw_home_backdrop(frame, inner, card, usize::from(app.logo_animation.frame));
-    draw_home_card_halo(frame, inner, card, usize::from(app.logo_animation.frame));
 
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(styles::ACCENT_DIM))
-            .style(Style::default().bg(styles::SURFACE_RAISED)),
-        card,
-    );
+    render_home_top_bar(frame, inner, app);
 
-    let content = card.inner(ratatui::layout::Margin {
-        horizontal: 3,
-        vertical: 1,
-    });
-    let sections = Layout::default()
+    let canvas = home_stage_rect(inner);
+    let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),
+            Constraint::Length(2),
+            Constraint::Length(5),
             Constraint::Length(1),
-            Constraint::Length(if home_content.detail.is_empty() { 0 } else { 1 }),
+            Constraint::Length(8),
             Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(if home_content.status.is_some() { 2 } else { 0 }),
-            Constraint::Min(1),
+            Constraint::Length(5),
+            Constraint::Min(0),
         ])
-        .split(content);
+        .split(canvas);
 
     frame.render_widget(
-        Paragraph::new(home_content.title)
-            .alignment(Alignment::Center)
-            .style(styles::accent_bold()),
-        sections[1],
+        Paragraph::new("You decide what ships.")
+            .alignment(Alignment::Left)
+            .style(styles::muted()),
+        rows[0],
     );
+    draw_home_progress_panel(frame, rows[1], &counts);
+    draw_home_command_panel(frame, rows[3], app, &home_content);
+    draw_home_tip(frame, rows[5], &home_content, &counts);
+}
 
-    if !home_content.detail.is_empty() {
-        frame.render_widget(
-            Paragraph::new(home_content.detail)
-                .alignment(Alignment::Center)
-                .style(styles::muted()),
-            sections[2],
-        );
-    }
-
-    draw_home_progress(frame, sections[3], &counts);
-
-    if let Some(status) = home_content.status {
-        frame.render_widget(
-            Paragraph::new(status)
-                .alignment(Alignment::Center)
-                .style(styles::muted())
-                .wrap(Wrap { trim: true }),
-            sections[5],
-        );
-    }
-
-    frame.render_widget(
-        Paragraph::new(home_key_hint_line(&home_content.key_hints))
-            .alignment(Alignment::Center)
-            .style(styles::soft_accent()),
-        sections[4],
-    );
+fn home_stage_rect(area: Rect) -> Rect {
+    let width = area.width.clamp(56, 104);
+    let height = area.height.clamp(24, 32);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + 3.min(area.height.saturating_sub(height)),
+        width,
+        height,
+    )
 }
 
 fn home_state(counts: &ReviewCounts, file_count: usize, review_busy: bool) -> HomeState {
@@ -1631,62 +1634,21 @@ fn home_state(counts: &ReviewCounts, file_count: usize, review_busy: bool) -> Ho
 }
 
 fn home_content(app: &App, state: HomeState, status: &str) -> HomeContent {
-    let binding = &app.settings.keybindings;
-    let refresh = key_label(command_binding(binding, KeybindingCommand::Refresh));
-    let commit = key_label(command_binding(binding, KeybindingCommand::Commit));
-    let settings = key_label(command_binding(binding, KeybindingCommand::Settings));
-    let (title, detail, fallback_status, key_hints) = match state {
+    let _ = app;
+    let (title, detail, fallback_status) = match state {
         HomeState::Empty => (
             "No changes",
             "Run your agent, then refresh.",
             Some("Worktree is clean."),
-            vec![
-                (refresh, "refresh"),
-                (settings, "settings"),
-                ("Ctrl+C".to_string(), "quit"),
-            ],
         ),
-        HomeState::NeedsReview => (
-            "Review queue",
-            "",
-            None,
-            vec![
-                ("Enter".to_string(), "review"),
-                (refresh, "refresh"),
-                (commit, "commit"),
-                (settings, "settings"),
-                ("Ctrl+C".to_string(), "quit"),
-            ],
-        ),
-        HomeState::ReadyToCommit => (
-            "Ready to commit",
-            "",
-            None,
-            vec![
-                (commit, "commit"),
-                ("Enter".to_string(), "review"),
-                (refresh, "refresh"),
-                (settings, "settings"),
-                ("Ctrl+C".to_string(), "quit"),
-            ],
-        ),
+        HomeState::NeedsReview => ("", "", None),
+        HomeState::ReadyToCommit => ("Ready to commit", "", None),
         HomeState::NothingAccepted => (
             "Nothing accepted",
             "Rejected changes stay in your worktree.",
             None,
-            vec![
-                ("Enter".to_string(), "review"),
-                (refresh, "refresh"),
-                (settings, "settings"),
-                ("Ctrl+C".to_string(), "quit"),
-            ],
         ),
-        HomeState::Busy => (
-            "Updating review",
-            "",
-            Some("Applying latest decision."),
-            vec![(settings, "settings"), ("Ctrl+C".to_string(), "quit")],
-        ),
+        HomeState::Busy => ("Updating review", "", Some("Applying latest decision.")),
     };
 
     let status = if should_show_home_status(status) {
@@ -1699,7 +1661,6 @@ fn home_content(app: &App, state: HomeState, status: &str) -> HomeContent {
         title,
         detail,
         status,
-        key_hints,
     }
 }
 
@@ -1716,294 +1677,194 @@ fn key_hint_span(app: &App, command: KeybindingCommand) -> Span<'static> {
     Span::styled(key_label(key_for(app, command)), styles::keybind())
 }
 
-fn home_key_hint_line(hints: &[(String, &'static str)]) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (index, (key, label)) in hints.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("      "));
-        }
-        spans.push(Span::styled(key.clone(), styles::keybind()));
-        spans.push(Span::styled(format!(" {label}"), styles::muted()));
-    }
-    Line::from(spans)
-}
-
-fn draw_home_progress(frame: &mut ratatui::Frame, area: Rect, counts: &ReviewCounts) {
+fn draw_home_progress_panel(frame: &mut ratatui::Frame, area: Rect, counts: &ReviewCounts) {
     frame.render_widget(
-        Paragraph::new(home_progress_line(counts)).alignment(Alignment::Center),
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(styles::BORDER_MUTED))
+            .style(Style::default().bg(styles::SURFACE)),
         area,
     );
+
+    let total = counts.unreviewed + counts.accepted + counts.rejected;
+    let reviewed = counts.accepted + counts.rejected;
+    let body = area.inner(ratatui::layout::Margin::new(2, 1));
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(body);
+
+    frame.render_widget(
+        Paragraph::new("Review progress").style(styles::subtle()),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{reviewed} / {total}"), styles::accent_bold()),
+            Span::styled(" files reviewed", styles::muted()),
+        ])),
+        rows[1],
+    );
+    frame.render_widget(Paragraph::new(home_progress_bar(reviewed, total)), rows[2]);
 }
 
-fn home_progress_line(counts: &ReviewCounts) -> Line<'static> {
-    let total = counts.unreviewed + counts.accepted + counts.rejected;
+fn home_progress_bar(reviewed: usize, total: usize) -> Line<'static> {
+    const WIDTH: usize = 28;
     if total == 0 {
         return Line::from(vec![
             Span::styled("[", styles::subtle()),
-            Span::styled("────────", styles::subtle()),
-            Span::styled("] ", styles::subtle()),
-            Span::styled("0 / 0 reviewed", styles::subtle()),
+            Span::styled("·".repeat(WIDTH), styles::subtle()),
+            Span::styled("]", styles::subtle()),
         ]);
     }
 
-    let reviewed = counts.accepted + counts.rejected;
-    let reviewed_segments = progress_segments(reviewed, total).min(8);
-    let (accepted_segments, rejected_segments) =
-        reviewed_progress_segments(counts, reviewed_segments);
-    let unreviewed_segments = 8 - reviewed_segments;
-
-    let mut spans = vec![Span::styled("[", styles::subtle())];
-    if accepted_segments > 0 {
-        spans.push(Span::styled(
-            "■".repeat(accepted_segments),
-            Style::default().fg(styles::SUCCESS),
-        ));
-    }
-    if rejected_segments > 0 {
-        spans.push(Span::styled(
-            "■".repeat(rejected_segments),
-            Style::default().fg(styles::DANGER),
-        ));
-    }
-    if unreviewed_segments > 0 {
-        spans.push(Span::styled(
-            "□".repeat(unreviewed_segments),
-            styles::subtle(),
-        ));
-    }
-    spans.push(Span::styled("] ", styles::subtle()));
-    spans.push(Span::styled(
-        format!("{} / {total} reviewed", counts.accepted + counts.rejected),
-        styles::muted(),
-    ));
-    Line::from(spans)
+    let filled = (reviewed * WIDTH).div_ceil(total);
+    Line::from(vec![
+        Span::styled("[", styles::subtle()),
+        Span::styled("■".repeat(filled), Style::default().fg(styles::ACCENT)),
+        Span::styled("·".repeat(WIDTH.saturating_sub(filled)), styles::subtle()),
+        Span::styled("]", styles::subtle()),
+    ])
 }
 
-fn progress_segments(count: usize, total: usize) -> usize {
-    if count == 0 || total == 0 {
-        return 0;
-    }
-    (count * 8).div_ceil(total)
-}
+fn draw_home_command_panel(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    app: &App,
+    content: &HomeContent,
+) {
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(styles::BORDER_MUTED))
+            .style(Style::default().bg(styles::SURFACE)),
+        area,
+    );
 
-fn reviewed_progress_segments(counts: &ReviewCounts, reviewed_segments: usize) -> (usize, usize) {
-    let reviewed = counts.accepted + counts.rejected;
-    if reviewed == 0 || reviewed_segments == 0 {
-        return (0, 0);
-    }
+    let body = area.inner(ratatui::layout::Margin::new(2, 1));
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Length(2),
+        ])
+        .split(body);
 
-    let mut accepted_segments = counts.accepted * reviewed_segments / reviewed;
-    if counts.accepted > 0 && accepted_segments == 0 {
-        accepted_segments = 1;
-    }
-
-    let mut rejected_segments = reviewed_segments.saturating_sub(accepted_segments);
-    if counts.rejected > 0 && rejected_segments == 0 && accepted_segments > 0 {
-        accepted_segments -= 1;
-        rejected_segments = 1;
-    }
-
-    (accepted_segments, rejected_segments)
-}
-
-fn home_card_rect(area: Rect) -> Rect {
-    let width = ((u32::from(area.width) * 64) / 100)
-        .clamp(46, 76)
-        .min(u32::from(area.width)) as u16;
-    let height = ((u32::from(area.height) * 48) / 100)
-        .clamp(13, 17)
-        .min(u32::from(area.height)) as u16;
-
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
-}
-
-fn draw_home_backdrop(frame: &mut ratatui::Frame, area: Rect, card: Rect, animation_frame: usize) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    let exclusion = expand_rect_within_area(card, area, 2, 1);
-    let buffer = frame.buffer_mut();
-
-    for local_y in 0..area.height {
-        for local_x in 0..area.width {
-            let x = area.x + local_x;
-            let y = area.y + local_y;
-            if rect_contains(exclusion, x, y) {
-                continue;
-            }
-            if !home_cascade_ambient_cell_is_active(local_x, local_y, animation_frame) {
-                continue;
-            }
-
-            if let Some(cell) = buffer.cell_mut((x, y)) {
-                cell.set_char(home_cascade_ambient_glyph(
-                    local_x,
-                    local_y,
-                    animation_frame,
-                ))
-                .set_style(Style::default().fg(styles::ACCENT_DIM).bg(styles::BASE_BG));
-            }
-        }
-    }
-
-    for local_x in 0..area.width {
-        if !home_cascade_column_is_active(local_x) {
-            continue;
-        }
-
-        let depth = home_cascade_lane_depth(local_x);
-        let trail_len = 4 + i32::from(local_x % 6) + i32::from(2_u16.saturating_sub(depth));
-        let gap = 6 + i32::from(local_x % 8) + i32::from(depth) * 2;
-        let speed = 5 + usize::from(depth) * 2 + (usize::from(local_x) % 3);
-        let period = i32::from(area.height) + trail_len + gap;
-        let phase = ((animation_frame / speed) as i32 + i32::from(local_x) * 5) % period;
-        let head = phase - trail_len;
-        let x = area.x + local_x;
-
-        for distance in 0..trail_len {
-            let local_y = head - distance;
-            if local_y < 0 || local_y >= i32::from(area.height) {
-                continue;
-            }
-
-            let y = area.y + local_y as u16;
-            if rect_contains(exclusion, x, y) {
-                continue;
-            }
-
-            if let Some(cell) = buffer.cell_mut((x, y)) {
-                cell.set_char(home_cascade_glyph(local_x, local_y as u16, animation_frame))
-                    .set_style(home_cascade_style(distance as u16, trail_len as u16, depth));
-            }
-        }
-    }
-}
-
-fn home_cascade_column_is_active(local_x: u16) -> bool {
-    local_x.is_multiple_of(4) || local_x.is_multiple_of(9)
-}
-
-fn home_cascade_lane_depth(local_x: u16) -> u16 {
-    ((local_x / 4) + (local_x / 9)) % 3
-}
-
-fn home_cascade_ambient_cell_is_active(local_x: u16, local_y: u16, animation_frame: usize) -> bool {
-    (usize::from(local_x) * 13 + usize::from(local_y) * 7 + animation_frame / 18).is_multiple_of(29)
-}
-
-fn home_cascade_ambient_glyph(local_x: u16, local_y: u16, animation_frame: usize) -> char {
-    let index = (usize::from(local_x) * 5 + usize::from(local_y) * 3 + animation_frame / 12)
-        % HOME_CASCADE_AMBIENT_GLYPHS.len();
-    HOME_CASCADE_AMBIENT_GLYPHS[index]
-}
-
-fn home_cascade_glyph(local_x: u16, local_y: u16, animation_frame: usize) -> char {
-    let index = (usize::from(local_x) * 17 + usize::from(local_y) * 11 + animation_frame / 4)
-        % HOME_CASCADE_GLYPHS.len();
-    HOME_CASCADE_GLYPHS[index]
-}
-
-fn home_cascade_style(distance: u16, trail_len: u16, depth: u16) -> Style {
-    let base = Style::default().bg(styles::BASE_BG);
-    let distance = u32::from(distance);
-    let trail_len = u32::from(trail_len.max(1));
-
-    if distance == 0 {
-        if depth >= 2 {
-            return base.fg(styles::ACCENT);
-        }
-        return base.fg(styles::ACCENT_BRIGHT).add_modifier(Modifier::BOLD);
-    }
-
-    if distance * 3 <= trail_len {
-        if depth >= 2 {
-            return base.fg(styles::ACCENT_DIM);
-        }
-        return base.fg(styles::ACCENT);
-    }
-
-    if distance * 3 <= trail_len * 2 {
-        return base.fg(styles::ACCENT_DIM);
-    }
-
-    base.fg(styles::TEXT_SUBTLE)
-}
-
-fn draw_home_card_halo(frame: &mut ratatui::Frame, area: Rect, card: Rect, animation_frame: usize) {
-    let halo = expand_rect_within_area(card, area, 2, 1);
-    if halo.width == 0 || halo.height == 0 {
-        return;
-    }
-
-    let buffer = frame.buffer_mut();
-    let right = halo.x.saturating_add(halo.width).saturating_sub(1);
-    let bottom = halo.y.saturating_add(halo.height).saturating_sub(1);
-
-    for x in halo.x..=right {
-        for y in [halo.y, bottom] {
-            if rect_contains(card, x, y) {
-                continue;
-            }
-            if let Some(cell) = buffer.cell_mut((x, y)) {
-                cell.set_char(home_halo_glyph(x, y, animation_frame))
-                    .set_style(Style::default().fg(styles::ACCENT_DIM).bg(styles::BASE_BG));
-            }
-        }
-    }
-
-    for y in halo.y..=bottom {
-        for x in [halo.x, right] {
-            if rect_contains(card, x, y) {
-                continue;
-            }
-            if let Some(cell) = buffer.cell_mut((x, y)) {
-                cell.set_char(home_halo_glyph(x, y, animation_frame))
-                    .set_style(Style::default().fg(styles::ACCENT_DIM).bg(styles::BASE_BG));
-            }
-        }
-    }
-}
-
-fn home_halo_glyph(x: u16, y: u16, animation_frame: usize) -> char {
-    if (usize::from(x) + usize::from(y) + animation_frame / 16).is_multiple_of(3) {
-        '.'
+    let label = if content.title == "No changes" {
+        "Refresh Review"
+    } else if content.title == "Ready to commit" {
+        "Commit Review"
     } else {
-        ' '
-    }
+        "Enter Review"
+    };
+    let detail = if !content.detail.is_empty() {
+        content.detail
+    } else if content.title == "Ready to commit" {
+        "Commit accepted changes"
+    } else {
+        "Step through AI-generated changes file by file"
+    };
+
+    frame.render_widget(Paragraph::new("Actions").style(styles::subtle()), rows[0]);
+    draw_home_command_row(frame, rows[2], "Enter", label, detail, true);
+    draw_home_command_row(
+        frame,
+        rows[4],
+        &key_label(key_for(app, KeybindingCommand::Settings)),
+        "Settings",
+        "Defaults, GitHub auth, AI preferences",
+        false,
+    );
 }
 
-fn expand_rect_within_area(rect: Rect, area: Rect, horizontal: u16, vertical: u16) -> Rect {
-    let left = rect.x.saturating_sub(horizontal).max(area.x);
-    let top = rect.y.saturating_sub(vertical).max(area.y);
-    let right = rect
-        .x
-        .saturating_add(rect.width)
-        .saturating_add(horizontal)
-        .min(area.x.saturating_add(area.width));
-    let bottom = rect
-        .y
-        .saturating_add(rect.height)
-        .saturating_add(vertical)
-        .min(area.y.saturating_add(area.height));
+fn draw_home_command_row(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    key: &str,
+    label: &str,
+    detail: &str,
+    primary: bool,
+) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(22),
+            Constraint::Min(20),
+            Constraint::Length(2),
+        ])
+        .split(area);
 
-    Rect::new(
-        left,
-        top,
-        right.saturating_sub(left),
-        bottom.saturating_sub(top),
-    )
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("[", styles::subtle()),
+                Span::styled(
+                    key.to_string(),
+                    if primary {
+                        Style::default()
+                            .fg(styles::ACCENT)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        styles::keybind()
+                    },
+                ),
+                Span::styled("] ", styles::subtle()),
+                Span::styled(
+                    label.to_string(),
+                    if primary {
+                        Style::default()
+                            .fg(styles::TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        styles::title()
+                    },
+                ),
+            ]),
+            Line::from(Span::styled(detail.to_string(), styles::muted())),
+        ]),
+        columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(if primary { "▶" } else { "" })
+            .alignment(Alignment::Right)
+            .style(
+                Style::default()
+                    .fg(styles::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        columns[2],
+    );
 }
 
-fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
-    let right = rect.x.saturating_add(rect.width);
-    let bottom = rect.y.saturating_add(rect.height);
-    x >= rect.x && x < right && y >= rect.y && y < bottom
+fn draw_home_tip(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    content: &HomeContent,
+    _counts: &ReviewCounts,
+) {
+    let text = content.status.clone().unwrap_or_else(|| {
+        "Resume here when your agent changes code. Review only what should ship.".to_string()
+    });
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled("Note", styles::subtle())),
+            Line::from(Span::styled(text, styles::muted())),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(styles::BORDER_MUTED))
+                .style(Style::default().bg(styles::SURFACE)),
+        ),
+        area,
+    );
 }
 
 fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -4185,54 +4046,34 @@ mod tests {
         assert_eq!(empty.title, "No changes");
         assert_eq!(empty.detail, "Run your agent, then refresh.");
         assert_eq!(empty.status, Some("Worktree is clean.".to_string()));
-        assert_eq!(empty.key_hints[0], ("r".to_string(), "refresh"));
 
         let queue = home_content(&app, HomeState::NeedsReview, HOME_DEFAULT_STATUS);
-        assert_eq!(queue.title, "Review queue");
+        assert_eq!(queue.title, "");
         assert_eq!(queue.detail, "");
         assert_eq!(queue.status, None);
-        assert!(queue.key_hints.contains(&("r".to_string(), "refresh")));
 
         let ready = home_content(&app, HomeState::ReadyToCommit, "Accepted hunk.");
         assert_eq!(ready.title, "Ready to commit");
         assert_eq!(ready.status, Some("Accepted hunk.".to_string()));
-        assert_eq!(ready.key_hints[0], ("c".to_string(), "commit"));
-        assert!(ready.key_hints.contains(&("r".to_string(), "refresh")));
-
-        let text = home_key_hint_line(&ready.key_hints)
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(text.starts_with("c commit"));
-        assert!(text.contains("Enter review"));
-        assert!(text.contains("r refresh"));
         assert!(!should_show_home_status(HOME_DEFAULT_STATUS));
         assert!(should_show_home_status("Accepted hunk."));
     }
 
     #[test]
-    fn home_progress_line_represents_reviewed_counts() {
-        let empty = home_progress_line(&ReviewCounts::default())
+    fn home_progress_bar_represents_reviewed_files() {
+        let empty = home_progress_bar(0, 0)
             .spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert_eq!(empty, "[────────] 0 / 0 reviewed");
+        assert_eq!(empty, "[····························]");
 
-        let mixed_counts = ReviewCounts {
-            unreviewed: 2,
-            accepted: 1,
-            rejected: 1,
-        };
-        let mixed = home_progress_line(&mixed_counts)
+        let half = home_progress_bar(2, 4)
             .spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert_eq!(mixed, "[■■■■□□□□] 2 / 4 reviewed");
-        assert_eq!(progress_segments(2, 4), 4);
-        assert_eq!(reviewed_progress_segments(&mixed_counts, 4), (2, 2));
+        assert_eq!(half, "[■■■■■■■■■■■■■■··············]");
     }
 
     #[test]
@@ -4378,55 +4219,11 @@ mod tests {
         assert_eq!(rect.x, 25);
         assert_eq!(rect.y, 15);
 
-        let home_card = home_card_rect(Rect::new(2, 1, 96, 30));
-        assert_eq!(home_card.width, 61);
-        assert_eq!(home_card.height, 14);
-        assert_eq!(home_card.x, 19);
-        assert_eq!(home_card.y, 9);
-    }
-
-    #[test]
-    fn home_cascade_helpers_are_stable() {
-        assert!(home_cascade_column_is_active(0));
-        assert!(!home_cascade_column_is_active(1));
-        assert!(home_cascade_column_is_active(9));
-        assert_eq!(home_cascade_lane_depth(0), 0);
-        assert_eq!(home_cascade_lane_depth(8), 2);
-
-        let glyph = home_cascade_glyph(4, 7, 12);
-        assert!(HOME_CASCADE_GLYPHS.contains(&glyph));
-
-        let ambient = home_cascade_ambient_glyph(4, 7, 12);
-        assert!(HOME_CASCADE_AMBIENT_GLYPHS.contains(&ambient));
-        assert!(home_cascade_ambient_cell_is_active(0, 0, 0));
-        assert!(!home_cascade_ambient_cell_is_active(1, 0, 0));
-
-        let head = home_cascade_style(0, 7, 0);
-        assert_eq!(head.fg, Some(styles::ACCENT_BRIGHT));
-        assert!(head.add_modifier.contains(Modifier::BOLD));
-
-        let background_head = home_cascade_style(0, 7, 2);
-        assert_eq!(background_head.fg, Some(styles::ACCENT));
-        assert!(!background_head.add_modifier.contains(Modifier::BOLD));
-
-        let tail = home_cascade_style(6, 7, 0);
-        assert_eq!(tail.fg, Some(styles::TEXT_SUBTLE));
-        assert_eq!(tail.bg, Some(styles::BASE_BG));
-
-        assert_eq!(home_halo_glyph(0, 0, 0), '.');
-        assert_eq!(home_halo_glyph(1, 0, 0), ' ');
-    }
-
-    #[test]
-    fn rect_helpers_expand_and_clip_to_area() {
-        let area = Rect::new(10, 5, 30, 12);
-        let rect = Rect::new(12, 7, 8, 4);
-        let expanded = expand_rect_within_area(rect, area, 2, 1);
-
-        assert_eq!(expanded, Rect::new(10, 6, 12, 6));
-        assert!(rect_contains(expanded, 10, 6));
-        assert!(rect_contains(expanded, 21, 11));
-        assert!(!rect_contains(expanded, 22, 11));
+        let home_stage = home_stage_rect(Rect::new(2, 1, 96, 30));
+        assert_eq!(home_stage.width, 96);
+        assert_eq!(home_stage.height, 30);
+        assert_eq!(home_stage.x, 2);
+        assert_eq!(home_stage.y, 1);
     }
 
     #[test]
@@ -4588,7 +4385,7 @@ mod tests {
         });
         assert!(lines.iter().any(|line| {
             line.spans.iter().any(|span| {
-                span.content.as_ref() == "Summary:" && span.style.fg == Some(styles::ACCENT_BRIGHT)
+                span.content.as_ref() == "Summary:" && span.style.fg == Some(styles::ACCENT)
             })
         }));
         assert!(lines.iter().any(|line| {
