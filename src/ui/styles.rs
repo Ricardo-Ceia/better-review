@@ -10,6 +10,8 @@ pub const TEXT_SUBTLE: Color = Color::Rgb(85, 85, 85);
 pub const ACCENT: Color = Color::Rgb(105, 48, 199);
 pub const ACCENT_BRIGHT: Color = Color::Rgb(221, 181, 248);
 pub const ACCENT_DIM: Color = Color::Rgb(58, 47, 102);
+pub const CODE_ADD: Color = Color::Rgb(154, 199, 165);
+pub const CODE_REMOVE: Color = Color::Rgb(209, 148, 166);
 pub const SUCCESS: Color = Color::Rgb(184, 184, 184);
 pub const DANGER: Color = Color::Rgb(147, 147, 147);
 
@@ -85,5 +87,11 @@ mod tests {
     fn subtle_style_matches_palette() {
         let style = subtle();
         assert_eq!(style.fg, Some(TEXT_SUBTLE));
+    }
+
+    #[test]
+    fn code_diff_colors_match_palette() {
+        assert_eq!(CODE_ADD, Color::Rgb(154, 199, 165));
+        assert_eq!(CODE_REMOVE, Color::Rgb(209, 148, 166));
     }
 }

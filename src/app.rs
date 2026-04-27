@@ -2011,10 +2011,10 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
             let status = match hunk.review_status {
                 ReviewStatus::Accepted => {
-                    Span::styled(" [accepted]", Style::default().fg(styles::SUCCESS))
+                    Span::styled(" [accepted]", Style::default().fg(styles::CODE_ADD))
                 }
                 ReviewStatus::Rejected => {
-                    Span::styled(" [rejected]", Style::default().fg(styles::DANGER))
+                    Span::styled(" [rejected]", Style::default().fg(styles::CODE_REMOVE))
                 }
                 ReviewStatus::Unreviewed => Span::styled(" [unreviewed]", styles::muted()),
             };
@@ -2039,8 +2039,8 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     DiffLineKind::Context => " ",
                 };
                 let style = match line.kind {
-                    DiffLineKind::Add => Style::default().fg(styles::SUCCESS),
-                    DiffLineKind::Remove => Style::default().fg(styles::DANGER),
+                    DiffLineKind::Add => Style::default().fg(styles::CODE_ADD),
+                    DiffLineKind::Remove => Style::default().fg(styles::CODE_REMOVE),
                     DiffLineKind::Context => Style::default().fg(styles::TEXT_MUTED),
                 };
                 let style = if is_current_line {
