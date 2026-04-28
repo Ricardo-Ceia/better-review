@@ -86,11 +86,11 @@ impl Palette {
     pub fn one_dark_pro() -> Self {
         Self {
             base_bg: Color::Rgb(40, 44, 52),
-            surface: Color::Rgb(33, 37, 43),
+            surface: Color::Rgb(40, 44, 52),
             surface_raised: Color::Rgb(62, 68, 81),
             border_muted: Color::Rgb(92, 99, 112),
             text_primary: Color::Rgb(171, 178, 191),
-            text_muted: Color::Rgb(130, 137, 151),
+            text_muted: Color::Rgb(171, 178, 191),
             text_subtle: Color::Rgb(92, 99, 112),
             accent: Color::Rgb(198, 120, 221),
             accent_bright: Color::Rgb(97, 175, 239),
@@ -102,8 +102,8 @@ impl Palette {
             syntax_comment: Color::Rgb(92, 99, 112),
             code_add: Color::Rgb(152, 195, 121),
             code_remove: Color::Rgb(224, 108, 117),
-            code_add_bg: Color::Rgb(42, 58, 43),
-            code_remove_bg: Color::Rgb(68, 45, 52),
+            code_add_bg: Color::Rgb(47, 61, 44),
+            code_remove_bg: Color::Rgb(74, 47, 51),
             success: Color::Rgb(152, 195, 121),
             danger: Color::Rgb(224, 108, 117),
         }
@@ -112,11 +112,11 @@ impl Palette {
     pub fn dracula() -> Self {
         Self {
             base_bg: Color::Rgb(40, 42, 54),
-            surface: Color::Rgb(33, 34, 44),
+            surface: Color::Rgb(40, 42, 54),
             surface_raised: Color::Rgb(68, 71, 90),
             border_muted: Color::Rgb(98, 114, 164),
             text_primary: Color::Rgb(248, 248, 242),
-            text_muted: Color::Rgb(189, 193, 205),
+            text_muted: Color::Rgb(248, 248, 242),
             text_subtle: Color::Rgb(98, 114, 164),
             accent: Color::Rgb(255, 121, 198),
             accent_bright: Color::Rgb(189, 147, 249),
@@ -128,8 +128,8 @@ impl Palette {
             syntax_comment: Color::Rgb(98, 114, 164),
             code_add: Color::Rgb(80, 250, 123),
             code_remove: Color::Rgb(255, 85, 85),
-            code_add_bg: Color::Rgb(38, 78, 58),
-            code_remove_bg: Color::Rgb(81, 42, 55),
+            code_add_bg: Color::Rgb(49, 81, 58),
+            code_remove_bg: Color::Rgb(90, 49, 58),
             success: Color::Rgb(80, 250, 123),
             danger: Color::Rgb(255, 85, 85),
         }
@@ -138,11 +138,11 @@ impl Palette {
     pub fn tokyo_night() -> Self {
         Self {
             base_bg: Color::Rgb(26, 27, 38),
-            surface: Color::Rgb(22, 22, 31),
+            surface: Color::Rgb(26, 27, 38),
             surface_raised: Color::Rgb(36, 40, 59),
             border_muted: Color::Rgb(86, 95, 137),
             text_primary: Color::Rgb(169, 177, 214),
-            text_muted: Color::Rgb(128, 138, 180),
+            text_muted: Color::Rgb(169, 177, 214),
             text_subtle: Color::Rgb(86, 95, 137),
             accent: Color::Rgb(187, 154, 247),
             accent_bright: Color::Rgb(167, 197, 255),
@@ -153,22 +153,22 @@ impl Palette {
             syntax_variable: Color::Rgb(224, 175, 104),
             syntax_comment: Color::Rgb(86, 95, 137),
             code_add: Color::Rgb(158, 206, 106),
-            code_remove: Color::Rgb(255, 158, 100),
-            code_add_bg: Color::Rgb(40, 66, 49),
-            code_remove_bg: Color::Rgb(72, 48, 42),
+            code_remove: Color::Rgb(247, 118, 142),
+            code_add_bg: Color::Rgb(43, 74, 59),
+            code_remove_bg: Color::Rgb(85, 52, 61),
             success: Color::Rgb(158, 206, 106),
-            danger: Color::Rgb(255, 158, 100),
+            danger: Color::Rgb(247, 118, 142),
         }
     }
 
     pub fn night_owl() -> Self {
         Self {
             base_bg: Color::Rgb(1, 4, 10),
-            surface: Color::Rgb(3, 23, 40),
+            surface: Color::Rgb(1, 22, 39),
             surface_raised: Color::Rgb(10, 38, 63),
             border_muted: Color::Rgb(99, 119, 119),
             text_primary: Color::Rgb(214, 225, 237),
-            text_muted: Color::Rgb(143, 164, 176),
+            text_muted: Color::Rgb(214, 225, 237),
             text_subtle: Color::Rgb(99, 119, 119),
             accent: Color::Rgb(199, 146, 234),
             accent_bright: Color::Rgb(130, 170, 255),
@@ -180,8 +180,8 @@ impl Palette {
             syntax_comment: Color::Rgb(99, 119, 119),
             code_add: Color::Rgb(173, 219, 103),
             code_remove: Color::Rgb(247, 140, 108),
-            code_add_bg: Color::Rgb(23, 66, 53),
-            code_remove_bg: Color::Rgb(70, 45, 50),
+            code_add_bg: Color::Rgb(22, 61, 48),
+            code_remove_bg: Color::Rgb(80, 47, 54),
             success: Color::Rgb(173, 219, 103),
             danger: Color::Rgb(247, 140, 108),
         }
@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(dracula.code_add, Color::Rgb(80, 250, 123));
         assert_eq!(dracula.code_remove, Color::Rgb(255, 85, 85));
         assert_eq!(tokyo.code_add, Color::Rgb(158, 206, 106));
-        assert_eq!(tokyo.code_remove, Color::Rgb(255, 158, 100));
+        assert_eq!(tokyo.code_remove, Color::Rgb(247, 118, 142));
         assert_eq!(night_owl.code_add, Color::Rgb(173, 219, 103));
         assert_eq!(night_owl.code_remove, Color::Rgb(247, 140, 108));
     }
@@ -404,6 +404,11 @@ mod tests {
         assert_ne!(default.code_add_bg, one_dark.code_add_bg);
         assert_ne!(one_dark.code_add_bg, dracula.code_add_bg);
         assert_ne!(dracula.code_add_bg, dracula.code_remove_bg);
+        assert_eq!(one_dark.code_add_bg, Color::Rgb(47, 61, 44));
+        assert_eq!(one_dark.code_remove_bg, Color::Rgb(74, 47, 51));
+        let tokyo = Palette::from_theme(ThemePreset::TokyoNight);
+        assert_eq!(tokyo.code_add_bg, Color::Rgb(43, 74, 59));
+        assert_eq!(tokyo.code_remove_bg, Color::Rgb(85, 52, 61));
     }
 
     #[test]

@@ -2070,13 +2070,13 @@ fn draw_review(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 ReviewStatus::Accepted => Span::styled(
                     " [accepted]",
                     Style::default()
-                        .fg(styles::text_primary())
+                        .fg(styles::success())
                         .bg(styles::code_add_bg()),
                 ),
                 ReviewStatus::Rejected => Span::styled(
                     " [rejected]",
                     Style::default()
-                        .fg(styles::text_primary())
+                        .fg(styles::danger())
                         .bg(styles::code_remove_bg()),
                 ),
                 ReviewStatus::Unreviewed => Span::styled(" [unreviewed]", styles::muted()),
@@ -3796,7 +3796,7 @@ fn diff_content_style(kind: DiffLineKind) -> Style {
             .fg(styles::syntax_string())
             .bg(styles::code_add_bg()),
         DiffLineKind::Remove => Style::default()
-            .fg(styles::text_primary())
+            .fg(styles::code_remove())
             .bg(styles::code_remove_bg()),
         DiffLineKind::Context => Style::default().fg(styles::text_muted()),
     }
