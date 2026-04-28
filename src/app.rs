@@ -3769,10 +3769,10 @@ fn line_number_style(kind: DiffLineKind) -> Style {
     match kind {
         DiffLineKind::Add => Style::default()
             .fg(styles::syntax_comment())
-            .bg(styles::code_add_bg()),
+            .bg(styles::code_add_gutter_bg()),
         DiffLineKind::Remove => Style::default()
             .fg(styles::syntax_comment())
-            .bg(styles::code_remove_bg()),
+            .bg(styles::code_remove_gutter_bg()),
         DiffLineKind::Context => styles::subtle(),
     }
 }
@@ -3780,12 +3780,12 @@ fn line_number_style(kind: DiffLineKind) -> Style {
 fn diff_marker_style(kind: DiffLineKind) -> Style {
     match kind {
         DiffLineKind::Add => Style::default()
-            .fg(styles::code_add())
-            .bg(styles::code_add_bg())
+            .fg(styles::code_add_gutter_fg())
+            .bg(styles::code_add_gutter_bg())
             .add_modifier(Modifier::BOLD),
         DiffLineKind::Remove => Style::default()
-            .fg(styles::code_remove())
-            .bg(styles::code_remove_bg())
+            .fg(styles::code_remove_gutter_fg())
+            .bg(styles::code_remove_gutter_bg())
             .add_modifier(Modifier::BOLD),
         DiffLineKind::Context => Style::default().fg(styles::text_muted()),
     }
@@ -4490,11 +4490,27 @@ mod tests {
         );
         assert_eq!(
             diff_marker_style(DiffLineKind::Add).fg,
-            Some(styles::code_add())
+            Some(styles::code_add_gutter_fg())
         );
         assert_eq!(
             diff_marker_style(DiffLineKind::Remove).fg,
-            Some(styles::code_remove())
+            Some(styles::code_remove_gutter_fg())
+        );
+        assert_eq!(
+            diff_marker_style(DiffLineKind::Add).bg,
+            Some(styles::code_add_gutter_bg())
+        );
+        assert_eq!(
+            diff_marker_style(DiffLineKind::Remove).bg,
+            Some(styles::code_remove_gutter_bg())
+        );
+        assert_eq!(
+            line_number_style(DiffLineKind::Add).bg,
+            Some(styles::code_add_gutter_bg())
+        );
+        assert_eq!(
+            line_number_style(DiffLineKind::Remove).bg,
+            Some(styles::code_remove_gutter_bg())
         );
         assert_eq!(diff_content_style(DiffLineKind::Context).bg, None);
     }

@@ -25,6 +25,10 @@ pub struct Palette {
     pub code_remove: Color,
     pub code_add_bg: Color,
     pub code_remove_bg: Color,
+    pub code_add_gutter_bg: Color,
+    pub code_remove_gutter_bg: Color,
+    pub code_add_gutter_fg: Color,
+    pub code_remove_gutter_fg: Color,
     pub success: Color,
     pub danger: Color,
 }
@@ -78,6 +82,10 @@ impl Palette {
             code_remove: Color::Rgb(209, 148, 166),
             code_add_bg: Color::Rgb(22, 43, 31),
             code_remove_bg: Color::Rgb(48, 24, 35),
+            code_add_gutter_bg: Color::Rgb(40, 72, 48),
+            code_remove_gutter_bg: Color::Rgb(80, 40, 50),
+            code_add_gutter_fg: Color::Rgb(154, 199, 165),
+            code_remove_gutter_fg: Color::Rgb(209, 148, 166),
             success: Color::Rgb(184, 184, 184),
             danger: Color::Rgb(147, 147, 147),
         }
@@ -102,8 +110,12 @@ impl Palette {
             syntax_comment: Color::Rgb(92, 99, 112),
             code_add: Color::Rgb(152, 195, 121),
             code_remove: Color::Rgb(224, 108, 117),
-            code_add_bg: Color::Rgb(47, 61, 44),
-            code_remove_bg: Color::Rgb(74, 47, 51),
+            code_add_bg: Color::Rgb(35, 50, 40),
+            code_remove_bg: Color::Rgb(50, 35, 38),
+            code_add_gutter_bg: Color::Rgb(50, 80, 55),
+            code_remove_gutter_bg: Color::Rgb(80, 50, 55),
+            code_add_gutter_fg: Color::Rgb(152, 195, 121),
+            code_remove_gutter_fg: Color::Rgb(224, 108, 117),
             success: Color::Rgb(152, 195, 121),
             danger: Color::Rgb(224, 108, 117),
         }
@@ -128,8 +140,12 @@ impl Palette {
             syntax_comment: Color::Rgb(98, 114, 164),
             code_add: Color::Rgb(80, 250, 123),
             code_remove: Color::Rgb(255, 85, 85),
-            code_add_bg: Color::Rgb(49, 81, 58),
-            code_remove_bg: Color::Rgb(90, 49, 58),
+            code_add_bg: Color::Rgb(35, 50, 40),
+            code_remove_bg: Color::Rgb(50, 35, 40),
+            code_add_gutter_bg: Color::Rgb(40, 80, 50),
+            code_remove_gutter_bg: Color::Rgb(80, 40, 50),
+            code_add_gutter_fg: Color::Rgb(80, 250, 123),
+            code_remove_gutter_fg: Color::Rgb(255, 85, 85),
             success: Color::Rgb(80, 250, 123),
             danger: Color::Rgb(255, 85, 85),
         }
@@ -154,8 +170,12 @@ impl Palette {
             syntax_comment: Color::Rgb(86, 95, 137),
             code_add: Color::Rgb(158, 206, 106),
             code_remove: Color::Rgb(247, 118, 142),
-            code_add_bg: Color::Rgb(43, 74, 59),
-            code_remove_bg: Color::Rgb(85, 52, 61),
+            code_add_bg: Color::Rgb(30, 49, 43),
+            code_remove_bg: Color::Rgb(52, 36, 47),
+            code_add_gutter_bg: Color::Rgb(43, 74, 59),
+            code_remove_gutter_bg: Color::Rgb(85, 52, 61),
+            code_add_gutter_fg: Color::Rgb(158, 206, 106),
+            code_remove_gutter_fg: Color::Rgb(247, 118, 142),
             success: Color::Rgb(158, 206, 106),
             danger: Color::Rgb(247, 118, 142),
         }
@@ -180,8 +200,12 @@ impl Palette {
             syntax_comment: Color::Rgb(99, 119, 119),
             code_add: Color::Rgb(173, 219, 103),
             code_remove: Color::Rgb(247, 140, 108),
-            code_add_bg: Color::Rgb(22, 61, 48),
-            code_remove_bg: Color::Rgb(80, 47, 54),
+            code_add_bg: Color::Rgb(16, 47, 39),
+            code_remove_bg: Color::Rgb(50, 35, 43),
+            code_add_gutter_bg: Color::Rgb(22, 61, 48),
+            code_remove_gutter_bg: Color::Rgb(80, 47, 54),
+            code_add_gutter_fg: Color::Rgb(173, 219, 103),
+            code_remove_gutter_fg: Color::Rgb(247, 140, 108),
             success: Color::Rgb(173, 219, 103),
             danger: Color::Rgb(247, 140, 108),
         }
@@ -260,20 +284,28 @@ pub fn accent_dim() -> Color {
     current_palette().accent_dim
 }
 
-pub fn code_add() -> Color {
-    current_palette().code_add
-}
-
-pub fn code_remove() -> Color {
-    current_palette().code_remove
-}
-
 pub fn code_add_bg() -> Color {
     current_palette().code_add_bg
 }
 
 pub fn code_remove_bg() -> Color {
     current_palette().code_remove_bg
+}
+
+pub fn code_add_gutter_bg() -> Color {
+    current_palette().code_add_gutter_bg
+}
+
+pub fn code_remove_gutter_bg() -> Color {
+    current_palette().code_remove_gutter_bg
+}
+
+pub fn code_add_gutter_fg() -> Color {
+    current_palette().code_add_gutter_fg
+}
+
+pub fn code_remove_gutter_fg() -> Color {
+    current_palette().code_remove_gutter_fg
 }
 
 pub fn syntax_keyword() -> Color {
@@ -401,14 +433,22 @@ mod tests {
         let one_dark = Palette::from_theme(ThemePreset::OneDarkPro);
         let dracula = Palette::from_theme(ThemePreset::Dracula);
 
-        assert_ne!(default.code_add_bg, one_dark.code_add_bg);
-        assert_ne!(one_dark.code_add_bg, dracula.code_add_bg);
-        assert_ne!(dracula.code_add_bg, dracula.code_remove_bg);
-        assert_eq!(one_dark.code_add_bg, Color::Rgb(47, 61, 44));
-        assert_eq!(one_dark.code_remove_bg, Color::Rgb(74, 47, 51));
+        assert_ne!(default.code_add_gutter_bg, one_dark.code_add_gutter_bg);
+        assert_ne!(one_dark.code_add_gutter_fg, dracula.code_add_gutter_fg);
+        assert_ne!(dracula.code_add_gutter_bg, dracula.code_remove_gutter_bg);
+        assert_eq!(one_dark.code_add_bg, Color::Rgb(35, 50, 40));
+        assert_eq!(one_dark.code_remove_bg, Color::Rgb(50, 35, 38));
+        assert_eq!(one_dark.code_add_gutter_bg, Color::Rgb(50, 80, 55));
+        assert_eq!(one_dark.code_remove_gutter_bg, Color::Rgb(80, 50, 55));
+        assert_eq!(dracula.code_add_bg, Color::Rgb(35, 50, 40));
+        assert_eq!(dracula.code_remove_bg, Color::Rgb(50, 35, 40));
+        assert_eq!(dracula.code_add_gutter_bg, Color::Rgb(40, 80, 50));
+        assert_eq!(dracula.code_remove_gutter_bg, Color::Rgb(80, 40, 50));
         let tokyo = Palette::from_theme(ThemePreset::TokyoNight);
-        assert_eq!(tokyo.code_add_bg, Color::Rgb(43, 74, 59));
-        assert_eq!(tokyo.code_remove_bg, Color::Rgb(85, 52, 61));
+        assert_eq!(tokyo.code_add_bg, Color::Rgb(30, 49, 43));
+        assert_eq!(tokyo.code_remove_bg, Color::Rgb(52, 36, 47));
+        assert_eq!(tokyo.code_add_gutter_bg, Color::Rgb(43, 74, 59));
+        assert_eq!(tokyo.code_remove_gutter_bg, Color::Rgb(85, 52, 61));
     }
 
     #[test]
