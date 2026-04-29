@@ -39,10 +39,9 @@ pub fn build_review_render_rows(file: &FileDiff) -> Vec<ReviewRenderRow> {
 }
 
 pub fn review_render_line_count(file: &FileDiff) -> usize {
-    1 + file
-        .hunks
+    file.hunks
         .iter()
-        .map(|hunk| 2 + rendered_hunk_row_count(hunk))
+        .map(|hunk| 2 + hunk.lines.len())
         .sum::<usize>()
 }
 
@@ -52,7 +51,7 @@ pub fn hunk_line_start(file: &FileDiff, hunk_index: usize) -> usize {
         if index == hunk_index {
             return line;
         }
-        line += 2 + rendered_hunk_row_count(hunk);
+        line += 2 + hunk.lines.len();
     }
     0
 }
@@ -65,11 +64,15 @@ pub fn hunk_index_for_line(file: &FileDiff, line_index: usize) -> usize {
     let mut current_line = 1;
     let mut current_hunk = 0;
     for (index, hunk) in file.hunks.iter().enumerate() {
-        let hunk_end = current_line + rendered_hunk_row_count(hunk);
+        let hunk_end = current_line + hunk.lines.len();
         if line_index <= hunk_end {
             return index;
         }
-        current_line = hunk_end + 1;
+        let spacer_line = hunk_end + 1;
+        if line_index <= spacer_line {
+            return index;
+        }
+        current_line = spacer_line + 1;
         current_hunk = index;
     }
     current_hunk
@@ -118,10 +121,6 @@ fn build_hunk_diff_rows(hunk_index: usize, hunk: &Hunk) -> Vec<ReviewRenderRow> 
     }
 
     rows
-}
-
-fn rendered_hunk_row_count(hunk: &Hunk) -> usize {
-    build_hunk_diff_rows(0, hunk).len()
 }
 
 fn as_side_line(line: &DiffLine) -> ReviewRenderSideLine {
@@ -211,10 +210,11 @@ mod tests {
         let file = sample_file();
         assert_eq!(review_render_line_count(&file), 8);
         assert_eq!(hunk_line_start(&file, 0), 1);
-        assert_eq!(hunk_line_start(&file, 1), 4);
+        assert_eq!(hunk_line_start(&file, 1), 5);
         assert_eq!(hunk_index_for_line(&file, 0), 0);
         assert_eq!(hunk_index_for_line(&file, 2), 0);
-        assert_eq!(hunk_index_for_line(&file, 4), 1);
+        assert_eq!(hunk_index_for_line(&file, 4), 0);
+        assert_eq!(hunk_index_for_line(&file, 5), 1);
         assert_eq!(hunk_index_for_line(&file, 99), 1);
     }
 }

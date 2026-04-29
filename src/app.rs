@@ -2664,11 +2664,6 @@ fn render_review_unified_lines(
         for line in &hunk.lines {
             let is_current_line =
                 app.review.focus == ReviewFocus::Hunks && app.review.cursor_line == logical_line;
-            let modifier = if is_current_line {
-                Modifier::UNDERLINED
-            } else {
-                Modifier::empty()
-            };
             let old = line
                 .old_line
                 .map(|n| format!("{n:>4}"))
@@ -2686,21 +2681,20 @@ fn render_review_unified_lines(
             let mut spans = vec![
                 Span::styled(
                     format!("{old} {new} "),
-                    line_number_style(line.kind).add_modifier(modifier),
+                    line_number_style_for(line.kind, is_current_line),
                 ),
                 Span::styled(
-                    diff_change_bar(line.kind),
-                    diff_change_bar_style(line.kind).add_modifier(modifier),
+                    diff_change_bar_for(line.kind, is_current_hunk),
+                    diff_change_bar_style_for(line.kind, is_current_hunk, is_current_line),
                 ),
-                Span::styled(marker, diff_marker_style(line.kind).add_modifier(modifier)),
-                Span::styled(" ", diff_row_style(line.kind).add_modifier(modifier)),
+                Span::styled(marker, diff_marker_style_for(line.kind, is_current_line)),
+                Span::styled(" ", diff_row_style_for(line.kind, is_current_line)),
             ];
-            spans.extend(syntax_highlight_diff_content(
-                &line.content,
-                line.kind,
-                modifier,
-            ));
-            fill_diff_row_background(&mut spans, line.kind, content_width);
+            let mut content_spans =
+                syntax_highlight_diff_content(&line.content, line.kind, Modifier::empty());
+            apply_bg_to_spans(&mut content_spans, diff_line_bg(line.kind, is_current_line));
+            spans.extend(content_spans);
+            fill_diff_row_background(&mut spans, line.kind, content_width, is_current_line);
             lines.push(Line::from(spans));
             logical_line += 1;
         }
@@ -2781,32 +2775,17 @@ fn render_review_side_spans(
     is_current_hunk: bool,
     is_current_line: bool,
 ) -> Vec<Span<'static>> {
-    let modifier = if is_current_line {
-        Modifier::UNDERLINED
-    } else {
-        Modifier::empty()
-    };
     let mut spans = Vec::new();
 
     let Some(line) = line else {
         let placeholder_width = usize::from(panel_width.saturating_sub(8)).clamp(4, 64);
-        spans.push(Span::styled(
-            "     ",
-            styles::subtle().add_modifier(modifier),
-        ));
-        spans.push(Span::styled("  ", styles::subtle().add_modifier(modifier)));
+        spans.push(Span::styled("     ", styles::subtle()));
+        spans.push(Span::styled("  ", styles::subtle()));
         spans.push(Span::styled(
             "╱".repeat(placeholder_width),
-            styles::subtle().add_modifier(modifier),
+            styles::subtle(),
         ));
         return spans;
-    };
-
-    let indicator_style = diff_change_bar_style(line.kind).add_modifier(modifier);
-    let indicator_style = if is_current_hunk {
-        indicator_style.add_modifier(Modifier::BOLD)
-    } else {
-        indicator_style
     };
 
     let prefix = line
@@ -2821,33 +2800,40 @@ fn render_review_side_spans(
 
     spans.push(Span::styled(
         prefix,
-        line_number_style(line.kind).add_modifier(modifier),
+        line_number_style_for(line.kind, is_current_line),
     ));
-    spans.push(Span::styled(diff_change_bar(line.kind), indicator_style));
+    spans.push(Span::styled(
+        diff_change_bar_for(line.kind, is_current_hunk),
+        diff_change_bar_style_for(line.kind, is_current_hunk, is_current_line),
+    ));
     spans.push(Span::styled(
         marker,
-        diff_marker_style(line.kind).add_modifier(modifier),
+        diff_marker_style_for(line.kind, is_current_line),
     ));
     spans.push(Span::styled(
         " ",
-        diff_row_style(line.kind).add_modifier(modifier),
+        diff_row_style_for(line.kind, is_current_line),
     ));
-    spans.extend(syntax_highlight_diff_content(
-        &line.content,
-        line.kind,
-        modifier,
-    ));
-    fill_diff_row_background(&mut spans, line.kind, panel_width);
+    let mut content_spans =
+        syntax_highlight_diff_content(&line.content, line.kind, Modifier::empty());
+    apply_bg_to_spans(&mut content_spans, diff_line_bg(line.kind, is_current_line));
+    spans.extend(content_spans);
+    fill_diff_row_background(&mut spans, line.kind, panel_width, is_current_line);
     spans
 }
 
-fn fill_diff_row_background(spans: &mut Vec<Span<'static>>, kind: DiffLineKind, width: u16) {
+fn fill_diff_row_background(
+    spans: &mut Vec<Span<'static>>,
+    kind: DiffLineKind,
+    width: u16,
+    is_current_line: bool,
+) {
     let used = spans_width(spans);
     let target = usize::from(width);
     if used < target {
         spans.push(Span::styled(
             " ".repeat(target - used),
-            diff_row_style(kind),
+            diff_row_style_for(kind, is_current_line),
         ));
     }
 }
@@ -4936,31 +4922,62 @@ fn move_review_cursor_by_line(app: &mut App, delta: isize) {
     }
 }
 
+#[cfg(test)]
 fn line_number_style(kind: DiffLineKind) -> Style {
+    line_number_style_for(kind, false)
+}
+
+fn line_number_style_for(kind: DiffLineKind, is_current_line: bool) -> Style {
     match kind {
         DiffLineKind::Add | DiffLineKind::Remove => Style::default()
             .fg(diff_change_bar_color(kind))
-            .bg(styles::surface_raised()),
-        DiffLineKind::Context => styles::subtle().bg(styles::surface_raised()),
+            .bg(if is_current_line {
+                diff_line_bg(kind, true)
+            } else {
+                styles::surface_raised()
+            }),
+        DiffLineKind::Context => styles::subtle().bg(if is_current_line {
+            diff_line_bg(kind, true)
+        } else {
+            styles::surface_raised()
+        }),
     }
 }
 
+#[cfg(test)]
 fn diff_change_bar(kind: DiffLineKind) -> &'static str {
+    diff_change_bar_for(kind, false)
+}
+
+fn diff_change_bar_for(kind: DiffLineKind, is_current_hunk: bool) -> &'static str {
     match kind {
         DiffLineKind::Add | DiffLineKind::Remove => "▌",
+        DiffLineKind::Context if is_current_hunk => "▌",
         DiffLineKind::Context => " ",
     }
 }
 
+#[cfg(test)]
 fn diff_change_bar_style(kind: DiffLineKind) -> Style {
+    diff_change_bar_style_for(kind, false, false)
+}
+
+fn diff_change_bar_style_for(
+    kind: DiffLineKind,
+    is_current_hunk: bool,
+    is_current_line: bool,
+) -> Style {
+    let bg = diff_line_bg(kind, is_current_line);
     match kind {
         DiffLineKind::Add | DiffLineKind::Remove => Style::default()
             .fg(diff_change_bar_color(kind))
-            .bg(diff_row_bg(kind))
+            .bg(bg)
             .add_modifier(Modifier::BOLD),
-        DiffLineKind::Context => Style::default()
-            .fg(styles::surface_raised())
-            .bg(styles::surface_raised()),
+        DiffLineKind::Context if is_current_hunk => Style::default()
+            .fg(styles::accent_bright_color())
+            .bg(bg)
+            .add_modifier(Modifier::BOLD),
+        DiffLineKind::Context => Style::default().fg(bg).bg(bg),
     }
 }
 
@@ -4980,15 +4997,36 @@ fn diff_row_bg(kind: DiffLineKind) -> Color {
     }
 }
 
+fn diff_current_line_bg(kind: DiffLineKind) -> Color {
+    match kind {
+        DiffLineKind::Add => Color::Indexed(28),
+        DiffLineKind::Remove => Color::Indexed(88),
+        DiffLineKind::Context => styles::accent_dim(),
+    }
+}
+
+fn diff_line_bg(kind: DiffLineKind, is_current_line: bool) -> Color {
+    if is_current_line {
+        diff_current_line_bg(kind)
+    } else {
+        diff_row_bg(kind)
+    }
+}
+
+#[cfg(test)]
 fn diff_marker_style(kind: DiffLineKind) -> Style {
+    diff_marker_style_for(kind, false)
+}
+
+fn diff_marker_style_for(kind: DiffLineKind, is_current_line: bool) -> Style {
     match kind {
         DiffLineKind::Add | DiffLineKind::Remove => Style::default()
             .fg(diff_change_bar_color(kind))
-            .bg(diff_row_bg(kind))
+            .bg(diff_line_bg(kind, is_current_line))
             .add_modifier(Modifier::BOLD),
         DiffLineKind::Context => Style::default()
             .fg(styles::text_muted())
-            .bg(diff_row_bg(kind)),
+            .bg(diff_line_bg(kind, is_current_line)),
     }
 }
 
@@ -5006,17 +5044,23 @@ fn diff_content_style(kind: DiffLineKind) -> Style {
     }
 }
 
-fn diff_row_style(kind: DiffLineKind) -> Style {
+fn diff_row_style_for(kind: DiffLineKind, is_current_line: bool) -> Style {
     match kind {
         DiffLineKind::Add => Style::default()
             .fg(styles::syntax_string())
-            .bg(diff_row_bg(kind)),
+            .bg(diff_line_bg(kind, is_current_line)),
         DiffLineKind::Remove => Style::default()
             .fg(styles::text_primary())
-            .bg(diff_row_bg(kind)),
+            .bg(diff_line_bg(kind, is_current_line)),
         DiffLineKind::Context => Style::default()
             .fg(styles::text_muted())
-            .bg(diff_row_bg(kind)),
+            .bg(diff_line_bg(kind, is_current_line)),
+    }
+}
+
+fn apply_bg_to_spans(spans: &mut [Span<'static>], bg: Color) {
+    for span in spans {
+        span.style = span.style.bg(bg);
     }
 }
 
@@ -5616,10 +5660,11 @@ mod tests {
         let file = sample_file();
         assert_eq!(review_render_line_count(&file), 7);
         assert_eq!(hunk_line_start(&file, 0), 1);
-        assert_eq!(hunk_line_start(&file, 1), 4);
+        assert_eq!(hunk_line_start(&file, 1), 5);
         assert_eq!(hunk_index_for_line(&file, 0), 0);
         assert_eq!(hunk_index_for_line(&file, 2), 0);
-        assert_eq!(hunk_index_for_line(&file, 4), 1);
+        assert_eq!(hunk_index_for_line(&file, 4), 0);
+        assert_eq!(hunk_index_for_line(&file, 5), 1);
         assert_eq!(hunk_index_for_line(&file, 99), 1);
     }
 
@@ -5635,7 +5680,7 @@ mod tests {
 
         sync_cursor_line_to_hunk(&mut review);
         assert_eq!(review.cursor_hunk, 1);
-        assert_eq!(review.cursor_line, 4);
+        assert_eq!(review.cursor_line, 5);
     }
 
     #[test]
@@ -5663,8 +5708,8 @@ mod tests {
             focus: ReviewFocus::Hunks,
         });
 
-        move_review_cursor_by_line(&mut app, 3);
-        assert_eq!(app.review.cursor_line, 4);
+        move_review_cursor_by_line(&mut app, 4);
+        assert_eq!(app.review.cursor_line, 5);
         assert_eq!(app.review.cursor_hunk, 1);
 
         move_review_cursor_by_line(&mut app, -99);
@@ -5807,7 +5852,7 @@ mod tests {
         );
         assert_eq!(
             diff_change_bar_style(DiffLineKind::Context).bg,
-            Some(styles::surface_raised())
+            Some(styles::surface())
         );
         assert_eq!(
             diff_content_style(DiffLineKind::Context).bg,
@@ -5817,6 +5862,40 @@ mod tests {
         assert_ne!(diff_row_bg(DiffLineKind::Remove), styles::surface());
         assert_eq!(diff_change_bar(DiffLineKind::Add), "▌");
         assert_eq!(diff_change_bar(DiffLineKind::Remove), "▌");
+    }
+
+    #[test]
+    fn current_hunk_focus_uses_rail_and_soft_line_background() {
+        styles::set_palette(Palette::from_theme(ThemePreset::OneDarkPro));
+        let file = sample_file();
+        let current_line = hunk_line_start(&file, 1) + 1;
+        let app = sample_app(ReviewUiState {
+            files: vec![file.clone()],
+            cursor_file: 0,
+            cursor_hunk: 1,
+            cursor_line: current_line,
+            focus: ReviewFocus::Hunks,
+        });
+
+        let lines = render_review_unified_lines(&app, &file, 60);
+        let current = &lines[current_line - 1];
+
+        assert_eq!(current.spans[1].content.as_ref(), "▌");
+        assert_eq!(
+            current.spans[1].style.fg,
+            Some(styles::accent_bright_color())
+        );
+        assert_eq!(
+            current.spans[1].style.bg,
+            Some(diff_current_line_bg(DiffLineKind::Context))
+        );
+        assert_eq!(
+            current.spans.last().and_then(|span| span.style.bg),
+            Some(diff_current_line_bg(DiffLineKind::Context))
+        );
+        for span in &current.spans {
+            assert!(!span.style.add_modifier.contains(Modifier::UNDERLINED));
+        }
     }
 
     #[test]
