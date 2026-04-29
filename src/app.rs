@@ -4345,7 +4345,7 @@ fn line_number_style(kind: DiffLineKind) -> Style {
 
 fn diff_change_bar(kind: DiffLineKind) -> &'static str {
     match kind {
-        DiffLineKind::Add | DiffLineKind::Remove => "█",
+        DiffLineKind::Add | DiffLineKind::Remove => "▌",
         DiffLineKind::Context => " ",
     }
 }
@@ -4354,7 +4354,7 @@ fn diff_change_bar_style(kind: DiffLineKind) -> Style {
     match kind {
         DiffLineKind::Add | DiffLineKind::Remove => Style::default()
             .fg(diff_change_bar_color(kind))
-            .bg(diff_change_bar_color(kind))
+            .bg(diff_row_bg(kind))
             .add_modifier(Modifier::BOLD),
         DiffLineKind::Context => Style::default()
             .fg(styles::surface_raised())
@@ -4364,34 +4364,18 @@ fn diff_change_bar_style(kind: DiffLineKind) -> Style {
 
 fn diff_change_bar_color(kind: DiffLineKind) -> Color {
     match kind {
-        DiffLineKind::Add => styles::success(),
-        DiffLineKind::Remove => styles::danger(),
+        DiffLineKind::Add => Color::Indexed(40),
+        DiffLineKind::Remove => Color::Indexed(160),
         DiffLineKind::Context => styles::border_muted(),
     }
 }
 
 fn diff_row_bg(kind: DiffLineKind) -> Color {
     match kind {
-        DiffLineKind::Add => blend_rgb(diff_change_bar_color(kind), styles::surface(), 42),
-        DiffLineKind::Remove => blend_rgb(diff_change_bar_color(kind), styles::surface(), 42),
+        DiffLineKind::Add => Color::Indexed(22),
+        DiffLineKind::Remove => Color::Indexed(52),
         DiffLineKind::Context => styles::surface(),
     }
-}
-
-fn blend_rgb(foreground: Color, background: Color, percent: u8) -> Color {
-    let Color::Rgb(fr, fg, fb) = foreground else {
-        return background;
-    };
-    let Color::Rgb(br, bg, bb) = background else {
-        return foreground;
-    };
-    let alpha = u16::from(percent.min(100));
-    let inv = 100_u16.saturating_sub(alpha);
-    Color::Rgb(
-        ((u16::from(fr) * alpha + u16::from(br) * inv) / 100) as u8,
-        ((u16::from(fg) * alpha + u16::from(bg) * inv) / 100) as u8,
-        ((u16::from(fb) * alpha + u16::from(bb) * inv) / 100) as u8,
-    )
 }
 
 fn diff_marker_style(kind: DiffLineKind) -> Style {
@@ -5153,11 +5137,11 @@ mod tests {
         );
         assert_eq!(
             diff_change_bar_style(DiffLineKind::Add).bg,
-            Some(diff_change_bar_color(DiffLineKind::Add))
+            Some(diff_row_bg(DiffLineKind::Add))
         );
         assert_eq!(
             diff_change_bar_style(DiffLineKind::Remove).bg,
-            Some(diff_change_bar_color(DiffLineKind::Remove))
+            Some(diff_row_bg(DiffLineKind::Remove))
         );
         assert_eq!(
             diff_change_bar_style(DiffLineKind::Context).bg,
@@ -5169,8 +5153,8 @@ mod tests {
         );
         assert_ne!(diff_row_bg(DiffLineKind::Add), styles::surface());
         assert_ne!(diff_row_bg(DiffLineKind::Remove), styles::surface());
-        assert_eq!(diff_change_bar(DiffLineKind::Add), "█");
-        assert_eq!(diff_change_bar(DiffLineKind::Remove), "█");
+        assert_eq!(diff_change_bar(DiffLineKind::Add), "▌");
+        assert_eq!(diff_change_bar(DiffLineKind::Remove), "▌");
     }
 
     #[test]
@@ -5189,14 +5173,14 @@ mod tests {
         let removed = &lines[1];
         let removed_width = spans_width(&removed.spans);
         assert!(removed_width >= 60);
-        assert_eq!(removed.spans[1].content.as_ref(), "█");
+        assert_eq!(removed.spans[1].content.as_ref(), "▌");
         assert_eq!(
             removed.spans[1].style.fg,
             Some(diff_change_bar_color(DiffLineKind::Remove))
         );
         assert_eq!(
             removed.spans[1].style.bg,
-            Some(diff_change_bar_color(DiffLineKind::Remove))
+            Some(diff_row_bg(DiffLineKind::Remove))
         );
         assert_eq!(
             removed.spans.last().and_then(|span| span.style.bg),
@@ -5204,14 +5188,14 @@ mod tests {
         );
         let mut rendered_removed = ratatui_core::buffer::Buffer::empty(Rect::new(0, 0, 80, 1));
         Paragraph::new(vec![removed.clone()]).render(Rect::new(0, 0, 80, 1), &mut rendered_removed);
-        assert_eq!(rendered_removed[(10, 0)].symbol(), "█");
+        assert_eq!(rendered_removed[(10, 0)].symbol(), "▌");
         assert_eq!(
             rendered_removed[(10, 0)].fg,
             diff_change_bar_color(DiffLineKind::Remove)
         );
         assert_eq!(
             rendered_removed[(10, 0)].bg,
-            diff_change_bar_color(DiffLineKind::Remove)
+            diff_row_bg(DiffLineKind::Remove)
         );
         assert_eq!(
             rendered_removed[(59, 0)].bg,
@@ -5221,14 +5205,14 @@ mod tests {
         let added = &lines[2];
         let added_width = spans_width(&added.spans);
         assert!(added_width >= 60);
-        assert_eq!(added.spans[1].content.as_ref(), "█");
+        assert_eq!(added.spans[1].content.as_ref(), "▌");
         assert_eq!(
             added.spans[1].style.fg,
             Some(diff_change_bar_color(DiffLineKind::Add))
         );
         assert_eq!(
             added.spans[1].style.bg,
-            Some(diff_change_bar_color(DiffLineKind::Add))
+            Some(diff_row_bg(DiffLineKind::Add))
         );
         assert_eq!(
             added.spans.last().and_then(|span| span.style.bg),
@@ -5236,15 +5220,12 @@ mod tests {
         );
         let mut rendered_added = ratatui_core::buffer::Buffer::empty(Rect::new(0, 0, 80, 1));
         Paragraph::new(vec![added.clone()]).render(Rect::new(0, 0, 80, 1), &mut rendered_added);
-        assert_eq!(rendered_added[(10, 0)].symbol(), "█");
+        assert_eq!(rendered_added[(10, 0)].symbol(), "▌");
         assert_eq!(
             rendered_added[(10, 0)].fg,
             diff_change_bar_color(DiffLineKind::Add)
         );
-        assert_eq!(
-            rendered_added[(10, 0)].bg,
-            diff_change_bar_color(DiffLineKind::Add)
-        );
+        assert_eq!(rendered_added[(10, 0)].bg, diff_row_bg(DiffLineKind::Add));
         assert_eq!(rendered_added[(59, 0)].bg, diff_row_bg(DiffLineKind::Add));
     }
 
