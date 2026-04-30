@@ -267,7 +267,4 @@ CI also enforces line coverage floors, including stricter thresholds for critica
 
 ### Docs and tests
 
-If you change user-visible behavior, update the README and the relevant tests in the same pull requesto.
-
-
-### TEST
+If you change user-visible behavior, update the README and the relevant tests in the same pull request.
