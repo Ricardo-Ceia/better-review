@@ -2305,7 +2305,7 @@ fn draw_review_sidebar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
             let marker = review_marker(file.review_status.clone(), file.status, false);
             let selection_bar = if selected { "▌" } else { " " };
-            let (tree_prefix, parent, leaf) = tree_sidebar_parts(file.display_path());
+            let (tree_prefix, parent, leaf) = sidebar_file_label_parts(file);
             let (added, removed) = file_line_stats(file);
             let (status_icon, status_style) = match file.status {
                 FileStatus::Added => (
@@ -2434,7 +2434,7 @@ fn draw_review_diff(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &Fi
             .block(
                 Block::default()
                     .title(Line::from(Span::styled(
-                        format!(" {} ", file.display_path()),
+                        format!(" {} ", file.display_label()),
                         styles::title(),
                     )))
                     .borders(Borders::ALL)
@@ -2461,7 +2461,7 @@ fn draw_review_diff(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &Fi
             .block(
                 Block::default()
                     .title(Line::from(Span::styled(
-                        format!(" {} ", file.display_path()),
+                        format!(" {} ", file.display_label()),
                         styles::title(),
                     )))
                     .borders(Borders::ALL)
@@ -2492,7 +2492,7 @@ fn draw_review_diff(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &Fi
                         Block::default()
                             .title(Line::from(vec![
                                 Span::styled(" [2] ", styles::accent_bold()),
-                                Span::styled(file.display_path().to_string(), styles::title()),
+                                Span::styled(file.display_label(), styles::title()),
                                 Span::styled("  new file  ", styles::subtle()),
                                 Span::styled(
                                     format!("+{added}"),
@@ -2523,7 +2523,7 @@ fn draw_review_diff(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &Fi
                         Block::default()
                             .title(Line::from(vec![
                                 Span::styled(" [2] ", styles::accent_bold()),
-                                Span::styled(file.display_path().to_string(), styles::title()),
+                                Span::styled(file.display_label(), styles::title()),
                                 Span::styled("  deleted file  ", styles::subtle()),
                                 Span::styled(
                                     format!("+{added}"),
@@ -2559,7 +2559,7 @@ fn draw_review_diff(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &Fi
                         Block::default()
                             .title(Line::from(vec![
                                 Span::styled(" [2] ", styles::accent_bold()),
-                                Span::styled(file.display_path().to_string(), styles::title()),
+                                Span::styled(file.display_label(), styles::title()),
                                 Span::styled(format!("  {status_label}  "), styles::subtle()),
                                 Span::styled(
                                     format!("+{added}"),
@@ -2588,7 +2588,7 @@ fn file_status_panel_label(status: FileStatus) -> &'static str {
         FileStatus::Deleted => "deleted file",
         FileStatus::Renamed => "renamed",
         FileStatus::Copied => "copied",
-        FileStatus::ModeChanged => "mode changed",
+        FileStatus::ModeChanged => "metadata",
         FileStatus::Modified => "unified",
     }
 }
@@ -2938,7 +2938,7 @@ fn draw_review_footer(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &
             ),
             Span::raw(" "),
             Span::styled(
-                truncate_path(file.display_path(), 48),
+                truncate_path(&file.display_label(), 48),
                 Style::default()
                     .fg(styles::syntax_variable())
                     .bg(styles::surface_raised())
@@ -3034,6 +3034,15 @@ fn append_footer_key(spans: &mut Vec<Span<'static>>, key: &str, label: &str) {
         format!(" {label} "),
         styles::muted().bg(styles::surface_raised()),
     ));
+}
+
+fn sidebar_file_label_parts(file: &FileDiff) -> (String, String, String) {
+    match file.status {
+        FileStatus::Renamed | FileStatus::Copied | FileStatus::ModeChanged => {
+            ("• ".to_string(), String::new(), file.display_label())
+        }
+        _ => tree_sidebar_parts(file.display_path()),
+    }
 }
 
 fn tree_sidebar_parts(path: &str) -> (String, String, String) {
@@ -4453,11 +4462,11 @@ fn explain_context_source_label(app: &App) -> String {
 fn explain_scope_preview(app: &App) -> Option<String> {
     let file = app.review.files.get(app.review.cursor_file)?;
     if app.review.focus == ReviewFocus::Files || file.hunks.is_empty() {
-        return Some(format!("file {}", file.display_path()));
+        return Some(format!("file {}", file.display_label()));
     }
 
     let hunk = file.hunks.get(app.review.cursor_hunk)?;
-    Some(format!("hunk {} {}", file.display_path(), hunk.header))
+    Some(format!("hunk {} {}", file.display_label(), hunk.header))
 }
 
 fn diff_scroll_offset(app: &App, area: Rect, diff_lines: &[Line<'_>]) -> u16 {
@@ -6095,6 +6104,53 @@ mod tests {
         assert_eq!(
             explain_scope_preview(&app),
             Some("hunk src/lib.rs @@ -10,1 +10,1 @@".to_string())
+        );
+    }
+
+    #[test]
+    fn path_changing_labels_are_used_in_review_helpers() {
+        let renamed = FileDiff {
+            old_path: "src/old.rs".to_string(),
+            new_path: "src/new.rs".to_string(),
+            status: FileStatus::Renamed,
+            ..FileDiff::default()
+        };
+        assert_eq!(file_status_panel_label(renamed.status), "renamed");
+        assert_eq!(
+            sidebar_file_label_parts(&renamed),
+            (
+                "• ".to_string(),
+                String::new(),
+                "src/old.rs → src/new.rs".to_string()
+            )
+        );
+
+        let mut app = sample_app(ReviewUiState {
+            files: vec![renamed],
+            cursor_file: 0,
+            cursor_hunk: 0,
+            cursor_line: 0,
+            focus: ReviewFocus::Files,
+        });
+        assert_eq!(
+            explain_scope_preview(&app),
+            Some("file src/old.rs → src/new.rs".to_string())
+        );
+
+        app.review.files[0].status = FileStatus::ModeChanged;
+        app.review.files[0].old_path.clear();
+        app.review.files[0].new_path = "script.sh".to_string();
+        assert_eq!(
+            file_status_panel_label(app.review.files[0].status),
+            "metadata"
+        );
+        assert_eq!(
+            sidebar_file_label_parts(&app.review.files[0]),
+            (
+                "• ".to_string(),
+                String::new(),
+                "script.sh mode changed".to_string()
+            )
         );
     }
 

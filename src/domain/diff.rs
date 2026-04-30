@@ -62,6 +62,19 @@ impl FileDiff {
         }
     }
 
+    pub fn display_label(&self) -> String {
+        match self.status {
+            FileStatus::Renamed if !self.old_path.is_empty() && !self.new_path.is_empty() => {
+                format!("{} → {}", self.old_path, self.new_path)
+            }
+            FileStatus::Copied if !self.old_path.is_empty() && !self.new_path.is_empty() => {
+                format!("{} ⧉ {}", self.old_path, self.new_path)
+            }
+            FileStatus::ModeChanged => format!("{} mode changed", self.display_path()),
+            _ => self.display_path().to_string(),
+        }
+    }
+
     pub fn set_all_hunks_status(&mut self, status: ReviewStatus) {
         for hunk in &mut self.hunks {
             hunk.review_status = status.clone();
@@ -95,7 +108,7 @@ impl FileDiff {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileDiff, ReviewStatus};
+    use super::{FileDiff, FileStatus, ReviewStatus};
 
     #[test]
     fn display_path_falls_back_to_old_path_for_deleted_file() {
@@ -106,6 +119,32 @@ mod tests {
         };
 
         assert_eq!(file.display_path(), "removed.txt");
+    }
+
+    #[test]
+    fn display_label_describes_path_changing_files() {
+        let renamed = FileDiff {
+            old_path: "src/old.rs".to_string(),
+            new_path: "src/new.rs".to_string(),
+            status: FileStatus::Renamed,
+            ..FileDiff::default()
+        };
+        assert_eq!(renamed.display_label(), "src/old.rs → src/new.rs");
+
+        let copied = FileDiff {
+            old_path: "src/source.rs".to_string(),
+            new_path: "src/copied.rs".to_string(),
+            status: FileStatus::Copied,
+            ..FileDiff::default()
+        };
+        assert_eq!(copied.display_label(), "src/source.rs ⧉ src/copied.rs");
+
+        let mode_changed = FileDiff {
+            new_path: "script.sh".to_string(),
+            status: FileStatus::ModeChanged,
+            ..FileDiff::default()
+        };
+        assert_eq!(mode_changed.display_label(), "script.sh mode changed");
     }
 
     #[test]

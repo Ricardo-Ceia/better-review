@@ -331,7 +331,7 @@ fn normalize_model(provider: Option<&str>, model: &str) -> String {
 
 pub fn why_target_for_file(file: &FileDiff) -> WhyTarget {
     WhyTarget::File {
-        path: file.display_path().to_string(),
+        path: file.display_label(),
         status: file_status_label(file.status).to_string(),
         diff: diff_text_for_file(file),
     }
@@ -339,7 +339,7 @@ pub fn why_target_for_file(file: &FileDiff) -> WhyTarget {
 
 pub fn why_target_for_hunk(file: &FileDiff, hunk: &Hunk) -> WhyTarget {
     WhyTarget::Hunk {
-        path: file.display_path().to_string(),
+        path: file.display_label(),
         header: hunk.header.clone(),
         diff: diff_text_for_hunk(file, hunk),
     }
@@ -1067,6 +1067,29 @@ Thanks!"#,
         assert!(prompt.contains("Scope: file"));
         assert!(prompt.contains("Status: modified"));
         assert!(prompt.contains("@@ -1,2 +1,2 @@"));
+    }
+
+    #[test]
+    fn path_changing_targets_use_display_labels() {
+        let mut file = sample_file();
+        file.old_path = "src/old.rs".to_string();
+        file.new_path = "src/new.rs".to_string();
+        file.status = FileStatus::Renamed;
+
+        let target = why_target_for_file(&file);
+        assert_eq!(target.label(), "file src/old.rs → src/new.rs");
+        assert_eq!(
+            target.cache_key("ses_1"),
+            "ses_1:file:src/old.rs → src/new.rs"
+        );
+        assert!(target.prompt().contains("Path: src/old.rs → src/new.rs"));
+        assert!(target.prompt().contains("Status: renamed"));
+
+        let hunk_target = why_target_for_hunk(&file, &file.hunks[0]);
+        assert_eq!(
+            hunk_target.label(),
+            format!("hunk src/old.rs → src/new.rs {}", file.hunks[0].header)
+        );
     }
 
     #[test]
