@@ -1,4 +1,6 @@
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub enum ReviewStatus {
     #[default]
     Unreviewed,
@@ -6,7 +8,7 @@ pub enum ReviewStatus {
     Rejected,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiffLine {
     pub kind: DiffLineKind,
     pub content: String,
@@ -14,14 +16,14 @@ pub struct DiffLine {
     pub new_line: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum DiffLineKind {
     Add,
     Remove,
     Context,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct Hunk {
     pub header: String,
     pub old_start: u32,
@@ -32,7 +34,7 @@ pub struct Hunk {
     pub review_status: ReviewStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum FileStatus {
     Added,
     Deleted,
@@ -43,7 +45,7 @@ pub enum FileStatus {
     Modified,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct FileDiff {
     pub old_path: String,
     pub new_path: String,

@@ -107,6 +107,14 @@ Run the installed binary:
 better-review
 ```
 
+Start the experimental local web UI instead of the TUI:
+
+```bash
+better-review web
+```
+
+The web mode binds to `127.0.0.1`, opens a browser with a local session token, and currently exposes a read-only review-state preview.
+
 If you launch the app before changes exist, or if new changes arrive after the app starts, press `r` to refresh the latest worktree state.
 
 ## Review Model
