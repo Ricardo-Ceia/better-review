@@ -13,18 +13,25 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::domain::diff::{FileDiff, Hunk, ReviewStatus};
-use crate::services::git::GitService;
+use crate::services::git::{GitService, PushFailure};
+use crate::settings::{AppSettings, SettingsStore};
 
 pub async fn run() -> Result<()> {
     let repo_path = std::env::current_dir().context("failed to resolve current directory")?;
     let git = GitService::new(&repo_path);
     let (_, files) = git.collect_diff().await?;
     let had_staged_changes_on_open = git.has_staged_changes().await?;
+    let settings_store = SettingsStore::new()?;
+    let settings = settings_store
+        .load()
+        .unwrap_or_else(|_| AppSettings::default());
     let token = local_session_token();
     let state = Arc::new(WebState {
         git,
         repo_path,
         token,
+        settings_store,
+        settings: Mutex::new(settings),
         review: Mutex::new(WebReviewState {
             files,
             had_staged_changes_on_open,
@@ -35,7 +42,10 @@ pub async fn run() -> Result<()> {
         .route("/", get(index))
         .route("/api/state", get(api_state))
         .route("/api/refresh", post(api_refresh))
+        .route("/api/settings", get(api_settings))
+        .route("/api/settings/github-token", post(api_save_github_token))
         .route("/api/commit", post(api_commit))
+        .route("/api/push", post(api_push))
         .route("/api/files/:file_index/accept", post(api_accept_file))
         .route("/api/files/:file_index/reject", post(api_reject_file))
         .route("/api/files/:file_index/unreview", post(api_unreview_file))
@@ -73,6 +83,8 @@ struct WebState {
     git: GitService,
     repo_path: PathBuf,
     token: String,
+    settings_store: SettingsStore,
+    settings: Mutex<AppSettings>,
     review: Mutex<WebReviewState>,
 }
 
@@ -96,6 +108,16 @@ struct ReviewStateResponse {
 #[derive(Debug, Deserialize)]
 struct CommitRequest {
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubTokenRequest {
+    token: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SettingsResponse {
+    has_github_token: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,6 +174,28 @@ async fn api_refresh(
         &review,
         "Refreshed review queue.",
     )))
+}
+
+async fn api_settings(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+) -> Result<Json<SettingsResponse>, ApiError> {
+    ensure_authorized(&state, auth)?;
+    let settings = state.settings.lock().await;
+    Ok(Json(settings_response(&settings)))
+}
+
+async fn api_save_github_token(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+    Json(payload): Json<GitHubTokenRequest>,
+) -> Result<Json<SettingsResponse>, ApiError> {
+    ensure_authorized(&state, auth)?;
+    let mut settings = state.settings.lock().await;
+    let token = payload.token.trim().to_string();
+    settings.github.token = if token.is_empty() { None } else { Some(token) };
+    state.settings_store.save(&settings)?;
+    Ok(Json(settings_response(&settings)))
 }
 
 async fn api_accept_file(
@@ -255,6 +299,25 @@ async fn api_commit(
     )))
 }
 
+async fn api_push(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+) -> Result<Json<ActionResponse>, ApiError> {
+    ensure_authorized(&state, auth)?;
+    let token = state.settings.lock().await.github.token.clone();
+    state
+        .git
+        .push_current_branch(token.as_deref())
+        .await
+        .map_err(ApiError::from)?;
+    let review = state.review.lock().await;
+    Ok(Json(action_response(
+        &state,
+        &review,
+        "Pushed reviewed commit to GitHub.",
+    )))
+}
+
 fn ensure_authorized(state: &WebState, auth: AuthQuery) -> Result<(), ApiError> {
     if auth.token.as_deref() == Some(state.token.as_str()) {
         Ok(())
@@ -262,6 +325,12 @@ fn ensure_authorized(state: &WebState, auth: AuthQuery) -> Result<(), ApiError> 
         Err(ApiError::unauthorized(
             "missing or invalid local session token",
         ))
+    }
+}
+
+fn settings_response(settings: &AppSettings) -> SettingsResponse {
+    SettingsResponse {
+        has_github_token: settings.github.token.is_some(),
     }
 }
 
@@ -396,6 +465,15 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+impl From<PushFailure> for ApiError {
+    fn from(error: PushFailure) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: error.message,
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let body = Json(serde_json::json!({ "error": self.message }));
@@ -453,7 +531,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .brand { grid-column: 2; font-weight: 800; letter-spacing: -0.04em; }
     .brand span { color: var(--accent); }
     .repo { justify-self: start; color: var(--muted); min-width: 0; max-width: 44vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .counts { justify-self: end; display: flex; gap: 8px; color: var(--muted); }
+    .counts { justify-self: end; display: flex; gap: 8px; color: var(--muted); align-items: center; }
     .pill { border: 1px solid #334155; border-radius: 999px; padding: 5px 9px; background: #0f172a; }
     .workspace { min-height: 0; display: grid; grid-template-columns: minmax(280px, 34vw) minmax(0, 1fr); gap: 12px; padding: 12px; }
     .hidden { display: none !important; }
@@ -525,6 +603,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <span class="pill"><strong id="pending">0</strong> pending</span>
         <span class="pill"><strong id="accepted">0</strong> accepted</span>
         <span class="pill"><strong id="rejected">0</strong> rejected</span>
+        <button id="openSettings" class="ghost">Settings</button>
       </div>
     </header>
 
@@ -563,6 +642,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <button id="rejectCurrent" class="danger">Reject</button>
             <button id="unreviewCurrent">Unreview</button>
             <button id="openCommit" class="primary">Commit</button>
+            <button id="publishCurrent">Publish</button>
           </div>
         </div>
         <div id="diff" class="diff-body"><div class="empty">Loading review state…</div></div>
@@ -587,6 +667,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <span><span class="key">u</span> unreview</span>
         <span><span class="key">r</span> refresh</span>
         <span><span class="key">c</span> commit</span>
+        <span><span class="key">p</span> publish</span>
+        <span><span class="key">s</span> settings</span>
         <span><span class="key">Ctrl+P</span> commands</span>
       </div>
     </footer>
@@ -599,6 +681,30 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div class="file-actions" style="justify-content: flex-end;">
         <button value="cancel">Cancel</button>
         <button id="submitCommit" class="primary" value="default">Commit</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="publishDialog">
+    <form method="dialog" style="display: grid; gap: 14px;">
+      <h2 style="margin: 0;">Publish reviewed commit</h2>
+      <p class="muted">Push the current branch using git. If your remote uses HTTPS, save a GitHub token in Settings first.</p>
+      <div class="file-actions" style="justify-content: flex-end;">
+        <button value="cancel">Not now</button>
+        <button id="submitPublish" class="primary" value="default">Push current branch</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settingsDialog">
+    <form method="dialog" style="display: grid; gap: 14px;">
+      <h2 style="margin: 0;">Settings</h2>
+      <p id="githubTokenStatus" class="muted">GitHub token is not set.</p>
+      <textarea id="githubTokenInput" placeholder="Paste a GitHub token for HTTPS publishing"></textarea>
+      <p class="muted">Stored locally and only used for git push authentication.</p>
+      <div class="file-actions" style="justify-content: flex-end;">
+        <button value="cancel">Cancel</button>
+        <button id="saveGithubToken" class="primary" value="default">Save token</button>
       </div>
     </form>
   </dialog>
@@ -616,6 +722,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let focus = 'files';
     let screen = 'home';
     let paletteCursor = 0;
+    let settings = { has_github_token: false };
 
     const iconFor = (file) => {
       if (file.is_binary) return '◈';
@@ -647,6 +754,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         { label: 'Reject selection', detail: 'Leave the current file or hunk out of the commit', shortcut: 'x', enabled: inReview, run: rejectCurrent },
         { label: 'Move file to unreviewed', detail: 'Unstage the current file and mark it pending', shortcut: 'u', enabled: inReview, run: unreviewCurrent },
         { label: 'Commit accepted changes', detail: 'Write a commit message for accepted changes', shortcut: 'c', enabled: reviewAvailable, run: () => document.getElementById('commitDialog').showModal() },
+        { label: 'Publish current branch', detail: 'Push the reviewed commit from the current branch', shortcut: 'p', enabled: true, run: () => document.getElementById('publishDialog').showModal() },
+        { label: 'Open settings', detail: 'Configure GitHub token for HTTPS publishing', shortcut: 's', enabled: true, run: openSettings },
       ];
     }
 
@@ -707,6 +816,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     async function loadState(message = 'Review state loaded.') {
+      settings = await request('/api/settings');
+      renderSettingsStatus();
       renderState(await request('/api/state'));
       setStatus(message);
     }
@@ -715,6 +826,37 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const result = await request(path, { method: 'POST' });
       renderState(result.state);
       setStatus(result.message || message);
+    }
+
+    function renderSettingsStatus() {
+      document.getElementById('githubTokenStatus').textContent = settings.has_github_token ? 'GitHub token is saved.' : 'GitHub token is not set.';
+    }
+
+    async function openSettings() {
+      settings = await request('/api/settings');
+      renderSettingsStatus();
+      document.getElementById('githubTokenInput').value = '';
+      document.getElementById('settingsDialog').showModal();
+      document.getElementById('githubTokenInput').focus();
+      setStatus('Settings opened.');
+    }
+
+    async function saveGithubToken() {
+      settings = await request('/api/settings/github-token', {
+        method: 'POST',
+        body: JSON.stringify({ token: document.getElementById('githubTokenInput').value }),
+      });
+      renderSettingsStatus();
+      document.getElementById('settingsDialog').close();
+      document.getElementById('githubTokenInput').value = '';
+      setStatus(settings.has_github_token ? 'GitHub token saved.' : 'GitHub token cleared.');
+    }
+
+    async function publishCurrentBranch() {
+      const result = await request('/api/push', { method: 'POST' });
+      renderState(result.state);
+      document.getElementById('publishDialog').close();
+      setStatus(result.message);
     }
 
     function renderState(nextState) {
@@ -902,10 +1044,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
     document.getElementById('homeRefresh').addEventListener('click', () => mutate('/api/refresh', 'Refreshed review queue.').catch(showError));
     document.getElementById('enterReview').addEventListener('click', enterReview);
     document.getElementById('homeCommit').addEventListener('click', () => document.getElementById('commitDialog').showModal());
+    document.getElementById('openSettings').addEventListener('click', () => openSettings().catch(showError));
     document.getElementById('acceptCurrent').addEventListener('click', () => acceptCurrent().catch(showError));
     document.getElementById('rejectCurrent').addEventListener('click', () => rejectCurrent().catch(showError));
     document.getElementById('unreviewCurrent').addEventListener('click', () => unreviewCurrent().catch(showError));
     document.getElementById('openCommit').addEventListener('click', () => document.getElementById('commitDialog').showModal());
+    document.getElementById('publishCurrent').addEventListener('click', () => document.getElementById('publishDialog').showModal());
+    document.getElementById('submitPublish').addEventListener('click', (event) => { event.preventDefault(); publishCurrentBranch().catch(showError); });
+    document.getElementById('saveGithubToken').addEventListener('click', (event) => { event.preventDefault(); saveGithubToken().catch(showError); });
     document.getElementById('paletteInput').addEventListener('input', () => { paletteCursor = 0; renderCommandPalette(); });
     document.getElementById('paletteInput').addEventListener('keydown', (event) => {
       if (event.key === 'Escape') { document.getElementById('commandPalette').close(); setStatus('Command palette closed.'); event.preventDefault(); }
@@ -923,6 +1069,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         document.getElementById('commitMessage').value = '';
         renderState(result.state);
         setStatus(result.message);
+        document.getElementById('publishDialog').showModal();
       } catch (error) { showError(error); }
     });
 
@@ -938,6 +1085,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         if (event.key === 'Enter') { enterReview(); event.preventDefault(); }
         else if (event.key === 'r') { mutate('/api/refresh', 'Refreshed review queue.').catch(showError); event.preventDefault(); }
         else if (event.key === 'c') { document.getElementById('commitDialog').showModal(); event.preventDefault(); }
+        else if (event.key === 'p') { document.getElementById('publishDialog').showModal(); event.preventDefault(); }
+        else if (event.key === 's') { openSettings().catch(showError); event.preventDefault(); }
         return;
       }
       if (event.key === 'j' || event.key === 'ArrowDown') {
@@ -960,6 +1109,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       else if (event.key === 'u') unreviewCurrent().catch(showError);
       else if (event.key === 'r') mutate('/api/refresh', 'Refreshed review queue.').catch(showError);
       else if (event.key === 'c') document.getElementById('commitDialog').showModal();
+      else if (event.key === 'p') document.getElementById('publishDialog').showModal();
+      else if (event.key === 's') openSettings().catch(showError);
     });
 
     loadState().catch(showError);
@@ -1011,6 +1162,15 @@ mod tests {
                 rejected: 1,
             }
         );
+    }
+
+    #[test]
+    fn settings_response_redacts_github_token() {
+        let mut settings = AppSettings::default();
+        assert!(!settings_response(&settings).has_github_token);
+
+        settings.github.token = Some("secret-token".to_string());
+        assert!(settings_response(&settings).has_github_token);
     }
 
     #[test]
