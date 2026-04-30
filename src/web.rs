@@ -506,6 +506,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
     textarea { width: 100%; min-height: 104px; border-radius: 12px; border: 1px solid #334155; background: #020617; color: var(--text); padding: 12px; }
     dialog { border: 1px solid #334155; border-radius: 18px; background: #111827; color: var(--text); max-width: 560px; width: calc(100% - 40px); }
     dialog::backdrop { background: rgb(0 0 0 / 0.62); }
+    .palette-dialog { padding: 0; overflow: hidden; }
+    .palette-input { width: 100%; border: 0; border-bottom: 1px solid #334155; background: #020617; color: var(--text); padding: 14px 16px; outline: none; }
+    .palette-list { list-style: none; margin: 0; padding: 8px; display: grid; gap: 6px; max-height: 420px; overflow: auto; }
+    .palette-item { display: grid; grid-template-columns: 1fr auto; gap: 12px; padding: 10px 12px; border-radius: 12px; color: var(--muted); }
+    .palette-item.selected { background: #172554; color: var(--text); }
+    .palette-item.disabled { opacity: 0.45; }
+    .palette-detail { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
     @media (max-width: 920px) { .workspace { grid-template-columns: 1fr; } .files { max-height: 40vh; } .topbar { grid-template-columns: 1fr; height: auto; gap: 6px; padding: 10px 14px; } .brand, .repo, .counts { grid-column: auto; justify-self: start; max-width: 100%; } }
   </style>
 </head>
@@ -580,6 +587,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <span><span class="key">u</span> unreview</span>
         <span><span class="key">r</span> refresh</span>
         <span><span class="key">c</span> commit</span>
+        <span><span class="key">Ctrl+P</span> commands</span>
       </div>
     </footer>
   </div>
@@ -595,6 +603,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </form>
   </dialog>
 
+  <dialog id="commandPalette" class="palette-dialog">
+    <input id="paletteInput" class="palette-input" placeholder="Type a command…" autocomplete="off" />
+    <ul id="paletteList" class="palette-list"></ul>
+  </dialog>
+
   <script>
     const token = new URLSearchParams(location.search).get('token');
     let state = null;
@@ -602,6 +615,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let selectedHunk = 0;
     let focus = 'files';
     let screen = 'home';
+    let paletteCursor = 0;
 
     const iconFor = (file) => {
       if (file.is_binary) return '◈';
@@ -617,6 +631,66 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const markerFor = (status) => status === 'Accepted' ? '[✓]' : status === 'Rejected' ? '[x]' : '[ ]';
     const prefixFor = (kind) => kind === 'Add' ? '+' : kind === 'Remove' ? '-' : ' ';
     const lineClass = (kind) => kind === 'Add' ? 'line-add' : kind === 'Remove' ? 'line-remove' : 'line-context';
+
+    function commandItems() {
+      const file = currentFile();
+      const reviewAvailable = !!state?.files.length;
+      const inReview = screen === 'review' && reviewAvailable;
+      const hasHunks = inReview && !!file?.hunks.length;
+      return [
+        { label: 'Refresh changes', detail: 'Reload the current worktree diff', shortcut: 'r', enabled: true, run: () => mutate('/api/refresh', 'Refreshed review queue.') },
+        { label: 'Enter review', detail: 'Open the review workspace', shortcut: 'Enter', enabled: screen === 'home' && reviewAvailable, run: () => enterReview() },
+        { label: 'Back to home', detail: 'Return to the better-review home screen', shortcut: 'Esc', enabled: screen === 'review', run: () => { screen = 'home'; focus = 'files'; renderState(state); setStatus('Back on the better-review home screen.'); } },
+        { label: 'Focus files', detail: 'Move focus to the changed-file sidebar', shortcut: 'Esc', enabled: inReview && focus === 'hunks', run: () => { focus = 'files'; renderState(state); setStatus('Focused changed files.'); } },
+        { label: 'Focus hunks', detail: 'Move focus into the diff hunks', shortcut: 'Enter', enabled: hasHunks, run: () => { focus = 'hunks'; renderState(state); setStatus('Focused diff hunks.'); } },
+        { label: 'Accept selection', detail: 'Stage the current file or hunk for commit', shortcut: 'y', enabled: inReview, run: acceptCurrent },
+        { label: 'Reject selection', detail: 'Leave the current file or hunk out of the commit', shortcut: 'x', enabled: inReview, run: rejectCurrent },
+        { label: 'Move file to unreviewed', detail: 'Unstage the current file and mark it pending', shortcut: 'u', enabled: inReview, run: unreviewCurrent },
+        { label: 'Commit accepted changes', detail: 'Write a commit message for accepted changes', shortcut: 'c', enabled: reviewAvailable, run: () => document.getElementById('commitDialog').showModal() },
+      ];
+    }
+
+    function filteredCommandItems() {
+      const query = document.getElementById('paletteInput').value.trim().toLowerCase();
+      const items = commandItems();
+      if (!query) return items;
+      return items.filter((item) => `${item.label} ${item.detail} ${item.shortcut}`.toLowerCase().includes(query));
+    }
+
+    function openCommandPalette() {
+      paletteCursor = 0;
+      document.getElementById('paletteInput').value = '';
+      renderCommandPalette();
+      document.getElementById('commandPalette').showModal();
+      document.getElementById('paletteInput').focus();
+      setStatus('Command palette opened.');
+    }
+
+    function renderCommandPalette() {
+      const list = document.getElementById('paletteList');
+      const items = filteredCommandItems();
+      paletteCursor = clamp(paletteCursor, 0, Math.max(0, items.length - 1));
+      list.innerHTML = '';
+      if (!items.length) { list.innerHTML = '<li class="palette-item disabled">No commands found</li>'; return; }
+      items.forEach((item, index) => {
+        const row = document.createElement('li');
+        row.className = `palette-item ${index === paletteCursor ? 'selected' : ''} ${item.enabled ? '' : 'disabled'}`;
+        row.innerHTML = `<div><strong></strong><span class="palette-detail"></span></div><span class="key"></span>`;
+        row.querySelector('strong').textContent = item.label;
+        row.querySelector('.palette-detail').textContent = item.detail;
+        row.querySelector('.key').textContent = item.shortcut;
+        row.addEventListener('mouseenter', () => { paletteCursor = index; renderCommandPalette(); });
+        row.addEventListener('click', () => runPaletteCommand(item));
+        list.appendChild(row);
+      });
+    }
+
+    async function runPaletteCommand(item = filteredCommandItems()[paletteCursor]) {
+      if (!item) return;
+      if (!item.enabled) { setStatus(`${item.label} is unavailable right now.`); return; }
+      document.getElementById('commandPalette').close();
+      await item.run();
+    }
 
     async function request(path, options = {}) {
       const separator = path.includes('?') ? '&' : '?';
@@ -832,6 +906,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
     document.getElementById('rejectCurrent').addEventListener('click', () => rejectCurrent().catch(showError));
     document.getElementById('unreviewCurrent').addEventListener('click', () => unreviewCurrent().catch(showError));
     document.getElementById('openCommit').addEventListener('click', () => document.getElementById('commitDialog').showModal());
+    document.getElementById('paletteInput').addEventListener('input', () => { paletteCursor = 0; renderCommandPalette(); });
+    document.getElementById('paletteInput').addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') { document.getElementById('commandPalette').close(); setStatus('Command palette closed.'); event.preventDefault(); }
+      else if (event.key === 'ArrowDown' || event.key === 'j') { paletteCursor += 1; renderCommandPalette(); event.preventDefault(); }
+      else if (event.key === 'ArrowUp' || event.key === 'k') { paletteCursor -= 1; renderCommandPalette(); event.preventDefault(); }
+      else if (event.key === 'Enter') { runPaletteCommand().catch(showError); event.preventDefault(); }
+    });
+
     document.getElementById('submitCommit').addEventListener('click', async (event) => {
       event.preventDefault();
       try {
@@ -845,6 +927,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     });
 
     document.addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && (event.key === 'p' || event.key === 'k')) {
+        event.preventDefault();
+        openCommandPalette();
+        return;
+      }
       if (event.target.closest('textarea, dialog')) return;
       const file = currentFile();
       if (screen === 'home') {
