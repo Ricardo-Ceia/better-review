@@ -2307,50 +2307,8 @@ fn draw_review_sidebar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let selection_bar = if selected { "▌" } else { " " };
             let (tree_prefix, parent, leaf) = sidebar_file_label_parts(file);
             let (added, removed) = file_line_stats(file);
-            let (status_icon, status_style) = match file.status {
-                FileStatus::Added => (
-                    "+",
-                    Style::default()
-                        .fg(diff_change_bar_color(DiffLineKind::Add))
-                        .bg(row_bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                FileStatus::Deleted => (
-                    "-",
-                    Style::default()
-                        .fg(diff_change_bar_color(DiffLineKind::Remove))
-                        .bg(row_bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                FileStatus::Renamed => (
-                    "→",
-                    Style::default()
-                        .fg(styles::accent_bright_color())
-                        .bg(row_bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                FileStatus::Copied => (
-                    "⧉",
-                    Style::default()
-                        .fg(styles::accent_bright_color())
-                        .bg(row_bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                FileStatus::ModeChanged => (
-                    "m",
-                    Style::default()
-                        .fg(styles::accent_bright_color())
-                        .bg(row_bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                FileStatus::Modified => (
-                    "~",
-                    Style::default()
-                        .fg(styles::accent_bright_color())
-                        .bg(row_bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            };
+            let status_icon = file_sidebar_icon(file);
+            let status_style = file_sidebar_icon_style(file, row_bg);
 
             ListItem::new(Line::from(vec![
                 Span::styled(
@@ -2580,6 +2538,40 @@ fn draw_review_diff(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &Fi
             );
         }
     }
+}
+
+fn file_sidebar_icon(file: &FileDiff) -> &'static str {
+    if file.is_binary {
+        return "◈";
+    }
+
+    match file.status {
+        FileStatus::Added => "+",
+        FileStatus::Deleted => "−",
+        FileStatus::Renamed => "→",
+        FileStatus::Copied => "⧉",
+        FileStatus::ModeChanged => "⚙",
+        FileStatus::Modified if file.hunks.is_empty() => "○",
+        FileStatus::Modified => "✎",
+    }
+}
+
+fn file_sidebar_icon_style(file: &FileDiff, bg: Color) -> Style {
+    let fg = if file.is_binary {
+        styles::syntax_string()
+    } else {
+        match file.status {
+            FileStatus::Added => diff_change_bar_color(DiffLineKind::Add),
+            FileStatus::Deleted => diff_change_bar_color(DiffLineKind::Remove),
+            FileStatus::Renamed | FileStatus::Copied | FileStatus::ModeChanged => {
+                styles::accent_bright_color()
+            }
+            FileStatus::Modified if file.hunks.is_empty() => styles::text_muted(),
+            FileStatus::Modified => styles::accent_bright_color(),
+        }
+    };
+
+    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
 }
 
 fn file_status_panel_label(status: FileStatus) -> &'static str {
@@ -5787,6 +5779,33 @@ mod tests {
             review_marker(ReviewStatus::Unreviewed, FileStatus::Modified, true),
             "[ ]"
         );
+
+        let modified = sample_file();
+        assert_eq!(file_sidebar_icon(&modified), "✎");
+        assert_eq!(
+            file_sidebar_icon(&FileDiff {
+                is_binary: true,
+                ..modified.clone()
+            }),
+            "◈"
+        );
+        assert_eq!(
+            file_sidebar_icon(&FileDiff {
+                status: FileStatus::ModeChanged,
+                hunks: Vec::new(),
+                ..modified.clone()
+            }),
+            "⚙"
+        );
+        assert_eq!(
+            file_sidebar_icon(&FileDiff {
+                status: FileStatus::Modified,
+                hunks: Vec::new(),
+                ..modified
+            }),
+            "○"
+        );
+
         assert_eq!(truncate_path("short.rs", 20), "short.rs");
         assert_eq!(truncate_path("very/long/path/file.rs", 10), "...file.rs");
     }
