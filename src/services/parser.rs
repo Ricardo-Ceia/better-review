@@ -19,7 +19,7 @@ pub fn parse_git_diff(diff: &str) -> anyhow::Result<Vec<FileDiff>> {
                 file.hunks.push(hunk);
             }
             if let Some(file) = current_file.take() {
-                files.push(file);
+                files.push(finalize_file(file));
             }
 
             let mut file = FileDiff::default();
@@ -44,6 +44,37 @@ pub fn parse_git_diff(diff: &str) -> anyhow::Result<Vec<FileDiff>> {
 
         if line.starts_with("deleted file mode ") {
             file.status = FileStatus::Deleted;
+            continue;
+        }
+
+        if line.starts_with("old mode ") || line.starts_with("new mode ") {
+            if file.status == FileStatus::Modified {
+                file.status = FileStatus::ModeChanged;
+            }
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("rename from ") {
+            file.old_path = rest.trim().to_string();
+            file.status = FileStatus::Renamed;
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("rename to ") {
+            file.new_path = rest.trim().to_string();
+            file.status = FileStatus::Renamed;
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("copy from ") {
+            file.old_path = rest.trim().to_string();
+            file.status = FileStatus::Copied;
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix("copy to ") {
+            file.new_path = rest.trim().to_string();
+            file.status = FileStatus::Copied;
             continue;
         }
 
@@ -153,10 +184,17 @@ pub fn parse_git_diff(diff: &str) -> anyhow::Result<Vec<FileDiff>> {
         file.hunks.push(hunk);
     }
     if let Some(file) = current_file {
-        files.push(file);
+        files.push(finalize_file(file));
     }
 
     Ok(files)
+}
+
+fn finalize_file(mut file: FileDiff) -> FileDiff {
+    if file.status == FileStatus::ModeChanged && !file.hunks.is_empty() {
+        file.status = FileStatus::Modified;
+    }
+    file
 }
 
 fn normalize_diff_path(path: &str) -> String {
@@ -211,12 +249,28 @@ copy to copied.txt
 
         let files = parse_git_diff(diff).unwrap();
         assert_eq!(files.len(), 2);
+        assert_eq!(files[0].status, FileStatus::Renamed);
         assert_eq!(files[0].old_path, "old_name.txt");
         assert_eq!(files[0].new_path, "new_name.txt");
         assert_eq!(files[0].hunks.len(), 0);
+        assert_eq!(files[1].status, FileStatus::Copied);
         assert_eq!(files[1].old_path, "source.txt");
         assert_eq!(files[1].new_path, "copied.txt");
         assert_eq!(files[1].hunks.len(), 0);
+    }
+
+    #[test]
+    fn parses_mode_only_changes() {
+        let diff = r#"diff --git a/script.sh b/script.sh
+old mode 100644
+new mode 100755
+"#;
+
+        let files = parse_git_diff(diff).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, FileStatus::ModeChanged);
+        assert_eq!(files[0].display_path(), "script.sh");
+        assert!(files[0].hunks.is_empty());
     }
 
     #[test]

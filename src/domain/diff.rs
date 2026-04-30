@@ -36,6 +36,9 @@ pub struct Hunk {
 pub enum FileStatus {
     Added,
     Deleted,
+    Renamed,
+    Copied,
+    ModeChanged,
     #[default]
     Modified,
 }

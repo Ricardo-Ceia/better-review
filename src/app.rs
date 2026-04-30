@@ -2322,6 +2322,27 @@ fn draw_review_sidebar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                         .bg(row_bg)
                         .add_modifier(Modifier::BOLD),
                 ),
+                FileStatus::Renamed => (
+                    "→",
+                    Style::default()
+                        .fg(styles::accent_bright_color())
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                FileStatus::Copied => (
+                    "⧉",
+                    Style::default()
+                        .fg(styles::accent_bright_color())
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                FileStatus::ModeChanged => (
+                    "m",
+                    Style::default()
+                        .fg(styles::accent_bright_color())
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 FileStatus::Modified => (
                     "~",
                     Style::default()
@@ -2522,10 +2543,14 @@ fn draw_review_diff(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &Fi
                 area,
             );
         }
-        FileStatus::Modified => {
+        FileStatus::Modified
+        | FileStatus::Renamed
+        | FileStatus::Copied
+        | FileStatus::ModeChanged => {
             let (added, removed) = file_line_stats(file);
             let lines = render_review_unified_lines(app, file, area.width.saturating_sub(2));
             let scroll = diff_scroll_offset(app, area, &lines);
+            let status_label = file_status_panel_label(file.status);
 
             frame.render_widget(
                 Paragraph::new(lines)
@@ -2535,7 +2560,7 @@ fn draw_review_diff(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &Fi
                             .title(Line::from(vec![
                                 Span::styled(" [2] ", styles::accent_bold()),
                                 Span::styled(file.display_path().to_string(), styles::title()),
-                                Span::styled("  unified  ", styles::subtle()),
+                                Span::styled(format!("  {status_label}  "), styles::subtle()),
                                 Span::styled(
                                     format!("+{added}"),
                                     Style::default().fg(diff_change_bar_color(DiffLineKind::Add)),
@@ -2554,6 +2579,17 @@ fn draw_review_diff(frame: &mut ratatui::Frame, area: Rect, app: &App, file: &Fi
                 area,
             );
         }
+    }
+}
+
+fn file_status_panel_label(status: FileStatus) -> &'static str {
+    match status {
+        FileStatus::Added => "new file",
+        FileStatus::Deleted => "deleted file",
+        FileStatus::Renamed => "renamed",
+        FileStatus::Copied => "copied",
+        FileStatus::ModeChanged => "mode changed",
+        FileStatus::Modified => "unified",
     }
 }
 
@@ -5202,6 +5238,9 @@ fn review_marker(
         ReviewStatus::Unreviewed => match file_status {
             crate::domain::diff::FileStatus::Added => "[+]",
             crate::domain::diff::FileStatus::Deleted => "[-]",
+            crate::domain::diff::FileStatus::Renamed => "[→]",
+            crate::domain::diff::FileStatus::Copied => "[⧉]",
+            crate::domain::diff::FileStatus::ModeChanged => "[m]",
             crate::domain::diff::FileStatus::Modified => "[ ]",
         },
     }

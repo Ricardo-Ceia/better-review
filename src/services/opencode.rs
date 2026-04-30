@@ -409,6 +409,9 @@ fn file_status_label(status: crate::domain::diff::FileStatus) -> &'static str {
     match status {
         crate::domain::diff::FileStatus::Added => "added",
         crate::domain::diff::FileStatus::Deleted => "deleted",
+        crate::domain::diff::FileStatus::Renamed => "renamed",
+        crate::domain::diff::FileStatus::Copied => "copied",
+        crate::domain::diff::FileStatus::ModeChanged => "mode changed",
         crate::domain::diff::FileStatus::Modified => "modified",
     }
 }

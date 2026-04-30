@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
-use crate::domain::diff::{FileDiff, ReviewStatus};
+use crate::domain::diff::{FileDiff, FileStatus, ReviewStatus};
 use crate::services::parser::parse_git_diff;
 
 const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -52,22 +52,28 @@ impl GitService {
     }
 
     pub async fn accept_file(&self, file: &mut FileDiff) -> Result<()> {
-        let path = display_path(file);
-        self.run_git(&["add", "--", path]).await?;
+        let paths = index_paths(file);
+        let mut args = vec!["add", "--"];
+        args.extend(paths);
+        self.run_git(&args).await?;
         file.set_all_hunks_status(ReviewStatus::Accepted);
         Ok(())
     }
 
     pub async fn reject_file_in_place(&self, file: &mut FileDiff) -> Result<()> {
-        let path = display_path(file);
-        self.run_git(&["restore", "--staged", "--", path]).await?;
+        let paths = index_paths(file);
+        let mut args = vec!["reset", "-q", "HEAD", "--"];
+        args.extend(paths);
+        self.run_git(&args).await?;
         file.set_all_hunks_status(ReviewStatus::Rejected);
         Ok(())
     }
 
     pub async fn unstage_file_in_place(&self, file: &mut FileDiff) -> Result<()> {
-        let path = display_path(file);
-        self.run_git(&["restore", "--staged", "--", path]).await?;
+        let paths = index_paths(file);
+        let mut args = vec!["reset", "-q", "HEAD", "--"];
+        args.extend(paths);
+        self.run_git(&args).await?;
         file.set_all_hunks_status(ReviewStatus::Unreviewed);
         Ok(())
     }
@@ -79,8 +85,10 @@ impl GitService {
     }
 
     pub async fn sync_file_hunks_to_index(&self, file: &FileDiff) -> Result<()> {
-        let path = display_path(file);
-        self.run_git(&["restore", "--staged", "--", path]).await?;
+        let paths = index_paths(file);
+        let mut args = vec!["reset", "-q", "HEAD", "--"];
+        args.extend(paths);
+        self.run_git(&args).await?;
 
         let accepted_patch = file
             .hunks
@@ -90,7 +98,12 @@ impl GitService {
             .collect::<Vec<_>>()
             .join("");
         if !accepted_patch.is_empty() {
-            self.apply_patch_to_index(&accepted_patch).await?;
+            let patch = if file.status == FileStatus::Renamed || file.status == FileStatus::Copied {
+                format!("{}{}", path_change_metadata_patch(file), accepted_patch)
+            } else {
+                accepted_patch
+            };
+            self.apply_patch_to_index(&patch).await?;
         }
 
         Ok(())
@@ -171,6 +184,7 @@ impl GitService {
                 "--no-color",
                 "--no-ext-diff",
                 "--find-renames",
+                "--find-copies-harder",
                 old_tree,
                 new_tree,
             ])
@@ -434,6 +448,28 @@ fn display_path(file: &FileDiff) -> &str {
     }
 }
 
+fn index_paths(file: &FileDiff) -> Vec<&str> {
+    match file.status {
+        FileStatus::Renamed => vec![file.old_path.as_str(), file.new_path.as_str()],
+        _ => vec![display_path(file)],
+    }
+}
+
+fn path_change_metadata_patch(file: &FileDiff) -> String {
+    let old_path = format!("a/{}", file.old_path);
+    let new_path = format!("b/{}", file.new_path);
+    let (from, to) = match file.status {
+        FileStatus::Renamed => ("rename from", "rename to"),
+        FileStatus::Copied => ("copy from", "copy to"),
+        _ => return String::new(),
+    };
+
+    format!(
+        "diff --git {old_path} {new_path}\nsimilarity index 100%\n{from} {}\n{to} {}\n--- {old_path}\n+++ {new_path}\n",
+        file.old_path, file.new_path
+    )
+}
+
 fn temp_git_index_path() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -505,7 +541,7 @@ mod tests {
     use std::path::Path;
     use tokio::process::Command;
 
-    use crate::domain::diff::ReviewStatus;
+    use crate::domain::diff::{FileStatus, ReviewStatus};
 
     #[tokio::test]
     async fn collect_diff_handles_empty_repo() -> Result<()> {
@@ -730,7 +766,222 @@ mod tests {
             .find(|file| file.old_path == "old_name.txt" && file.new_path == "new_name.txt")
             .expect("renamed file in diff");
 
+        assert_eq!(file.status, FileStatus::Renamed);
         assert!(file.hunks.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn accept_file_stages_filesystem_rename_with_both_paths() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "old.txt", "rename me\n").await?;
+        git(temp.path(), &["add", "old.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        tokio::fs::rename(temp.path().join("old.txt"), temp.path().join("new.txt")).await?;
+
+        let service = GitService::new(temp.path());
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.old_path == "old.txt" && file.new_path == "new.txt")
+            .expect("renamed file in diff");
+
+        assert_eq!(file.status, FileStatus::Renamed);
+        service.accept_file(file).await?;
+
+        let staged = git_stdout(
+            temp.path(),
+            &["diff", "--cached", "--find-renames", "--name-status"],
+        )
+        .await?;
+        assert!(
+            staged.contains("R100\told.txt\tnew.txt"),
+            "unexpected staged diff: {staged}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reject_file_unstages_already_staged_rename_with_both_paths() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "old.txt", "rename me\n").await?;
+        git(temp.path(), &["add", "old.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+        git(temp.path(), &["mv", "old.txt", "new.txt"]).await?;
+
+        let service = GitService::new(temp.path());
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.old_path == "old.txt" && file.new_path == "new.txt")
+            .expect("renamed file in diff");
+
+        service.reject_file_in_place(file).await?;
+
+        assert_eq!(file.review_status, ReviewStatus::Rejected);
+        assert!(!service.has_staged_changes().await?);
+        let status = git_stdout(temp.path(), &["status", "--short"]).await?;
+        assert!(status.contains(" D old.txt"), "unexpected status: {status}");
+        assert!(status.contains("?? new.txt"), "unexpected status: {status}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn accept_file_stages_rename_with_content_modification() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "old.txt", &numbered_lines()).await?;
+        git(temp.path(), &["add", "old.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        tokio::fs::rename(temp.path().join("old.txt"), temp.path().join("new.txt")).await?;
+        write_file(temp.path(), "new.txt", &numbered_lines_with_changes()).await?;
+
+        let service = GitService::new(temp.path());
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.old_path == "old.txt" && file.new_path == "new.txt")
+            .expect("renamed file in diff");
+
+        assert_eq!(file.status, FileStatus::Renamed);
+        assert!(!file.hunks.is_empty());
+        service.accept_file(file).await?;
+
+        let staged = git_stdout(
+            temp.path(),
+            &[
+                "diff",
+                "--cached",
+                "--find-renames",
+                "--",
+                "old.txt",
+                "new.txt",
+            ],
+        )
+        .await?;
+        assert!(
+            staged.contains("rename from old.txt"),
+            "unexpected staged diff: {staged}"
+        );
+        assert!(
+            staged.contains("rename to new.txt"),
+            "unexpected staged diff: {staged}"
+        );
+        assert!(staged.contains("+TEN"), "unexpected staged diff: {staged}");
+        assert!(
+            staged.contains("+TWENTY"),
+            "unexpected staged diff: {staged}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn accept_file_stages_copy_without_unstaging_source_changes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "source.txt", &numbered_lines()).await?;
+        git(temp.path(), &["add", "source.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        tokio::fs::copy(
+            temp.path().join("source.txt"),
+            temp.path().join("copied.txt"),
+        )
+        .await?;
+
+        let service = GitService::new(temp.path());
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.old_path == "source.txt" && file.new_path == "copied.txt")
+            .expect("copied file in diff");
+
+        assert_eq!(file.status, FileStatus::Copied);
+        service.accept_file(file).await?;
+
+        let staged = git_stdout(
+            temp.path(),
+            &["diff", "--cached", "--find-copies-harder", "--name-status"],
+        )
+        .await?;
+        assert!(
+            staged.contains("C100\tsource.txt\tcopied.txt"),
+            "unexpected staged diff: {staged}"
+        );
+        service.reject_file_in_place(file).await?;
+        assert!(!service.has_staged_changes().await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_file_hunks_stages_metadata_and_accepted_hunks_for_renamed_file() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        init_repo(temp.path()).await?;
+        write_file(temp.path(), "old.txt", &numbered_lines()).await?;
+        git(temp.path(), &["add", "old.txt"]).await?;
+        git(temp.path(), &["commit", "-m", "init"]).await?;
+
+        tokio::fs::rename(temp.path().join("old.txt"), temp.path().join("new.txt")).await?;
+        write_file(temp.path(), "new.txt", &numbered_lines_with_changes()).await?;
+
+        let service = GitService::new(temp.path());
+        let (_, mut files) = service.collect_diff().await?;
+        let file = files
+            .iter_mut()
+            .find(|file| file.old_path == "old.txt" && file.new_path == "new.txt")
+            .expect("renamed file in diff");
+        assert_eq!(file.status, FileStatus::Renamed);
+        assert!(
+            file.hunks.len() >= 2,
+            "expected separate hunks: {:?}",
+            file.hunks
+        );
+
+        for hunk in &mut file.hunks {
+            hunk.review_status = if hunk.old_start < 15 {
+                ReviewStatus::Accepted
+            } else {
+                ReviewStatus::Rejected
+            };
+        }
+        file.sync_review_status();
+        service.sync_file_hunks_to_index(file).await?;
+
+        let staged = git_stdout(
+            temp.path(),
+            &[
+                "diff",
+                "--cached",
+                "--find-renames",
+                "--",
+                "old.txt",
+                "new.txt",
+            ],
+        )
+        .await?;
+        assert!(
+            staged.contains("rename from old.txt"),
+            "unexpected staged diff: {staged}"
+        );
+        assert!(
+            staged.contains("rename to new.txt"),
+            "unexpected staged diff: {staged}"
+        );
+        assert!(staged.contains("+TEN"), "unexpected staged diff: {staged}");
+        assert!(
+            !staged.contains("+TWENTY"),
+            "unexpected staged diff: {staged}"
+        );
+
+        let unstaged = git_stdout(temp.path(), &["diff", "--", "new.txt"]).await?;
+        assert!(
+            unstaged.contains("+TWENTY"),
+            "unexpected unstaged diff: {unstaged}"
+        );
         Ok(())
     }
 
@@ -1155,5 +1406,25 @@ mod tests {
         .await?;
         chmod_plus_x(root, &hook_path).await?;
         Ok(())
+    }
+
+    fn numbered_lines() -> String {
+        (1..=20)
+            .map(|number| number.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    fn numbered_lines_with_changes() -> String {
+        (1..=20)
+            .map(|number| match number {
+                10 => "TEN".to_string(),
+                20 => "TWENTY".to_string(),
+                _ => number.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
     }
 }
