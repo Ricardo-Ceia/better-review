@@ -641,6 +641,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             <button id="acceptCurrent">Accept</button>
             <button id="rejectCurrent" class="danger">Reject</button>
             <button id="unreviewCurrent">Unreview</button>
+            <button id="openExplain">Explain</button>
             <button id="openCommit" class="primary">Commit</button>
             <button id="publishCurrent">Publish</button>
           </div>
@@ -665,6 +666,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <span><span class="key">y</span> accept</span>
         <span><span class="key">x</span> reject</span>
         <span><span class="key">u</span> unreview</span>
+        <span><span class="key">e</span> explain</span>
         <span><span class="key">r</span> refresh</span>
         <span><span class="key">c</span> commit</span>
         <span><span class="key">p</span> publish</span>
@@ -681,6 +683,28 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <div class="file-actions" style="justify-content: flex-end;">
         <button value="cancel">Cancel</button>
         <button id="submitCommit" class="primary" value="default">Commit</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="explainDialog">
+    <form method="dialog" style="display: grid; gap: 14px;">
+      <h2 style="margin: 0;">Explain selection</h2>
+      <div>
+        <div class="muted">Scope</div>
+        <code id="explainScope">No selection</code>
+      </div>
+      <div>
+        <div class="muted">Context</div>
+        <p class="muted" style="margin: 4px 0 0;">Session context selection is coming in the next phase.</p>
+      </div>
+      <div>
+        <div class="muted">Answer</div>
+        <p id="explainAnswer" class="muted" style="margin: 4px 0 0;">No explanation has been requested yet.</p>
+      </div>
+      <div class="file-actions" style="justify-content: flex-end;">
+        <button value="cancel">Close</button>
+        <button id="requestExplain" class="primary" value="default">Explain</button>
       </div>
     </form>
   </dialog>
@@ -753,6 +777,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         { label: 'Accept selection', detail: 'Stage the current file or hunk for commit', shortcut: 'y', enabled: inReview, run: acceptCurrent },
         { label: 'Reject selection', detail: 'Leave the current file or hunk out of the commit', shortcut: 'x', enabled: inReview, run: rejectCurrent },
         { label: 'Move file to unreviewed', detail: 'Unstage the current file and mark it pending', shortcut: 'u', enabled: inReview, run: unreviewCurrent },
+        { label: 'Open Explain menu', detail: 'Preview the current file or hunk explanation target', shortcut: 'e', enabled: inReview, run: openExplainMenu },
         { label: 'Commit accepted changes', detail: 'Write a commit message for accepted changes', shortcut: 'c', enabled: reviewAvailable, run: () => document.getElementById('commitDialog').showModal() },
         { label: 'Publish current branch', detail: 'Push the reviewed commit from the current branch', shortcut: 'p', enabled: true, run: () => document.getElementById('publishDialog').showModal() },
         { label: 'Open settings', detail: 'Configure GitHub token for HTTPS publishing', shortcut: 's', enabled: true, run: openSettings },
@@ -857,6 +882,25 @@ const INDEX_HTML: &str = r#"<!doctype html>
       renderState(result.state);
       document.getElementById('publishDialog').close();
       setStatus(result.message);
+    }
+
+    function explainTargetLabel() {
+      const file = currentFile();
+      if (!file) return 'No selection';
+      if (focus === 'hunks' && file.hunks.length) return `hunk ${file.display_label} ${file.hunks[selectedHunk].header}`;
+      return `file ${file.display_label}`;
+    }
+
+    function openExplainMenu() {
+      document.getElementById('explainScope').textContent = explainTargetLabel();
+      document.getElementById('explainAnswer').textContent = 'No explanation has been requested yet.';
+      document.getElementById('explainDialog').showModal();
+      setStatus('Explain menu opened.');
+    }
+
+    function requestExplainPreview() {
+      document.getElementById('explainAnswer').textContent = 'Explain execution will be wired up after context and model selection are available.';
+      setStatus('Explain request flow is not connected yet.');
     }
 
     function renderState(nextState) {
@@ -1048,6 +1092,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     document.getElementById('acceptCurrent').addEventListener('click', () => acceptCurrent().catch(showError));
     document.getElementById('rejectCurrent').addEventListener('click', () => rejectCurrent().catch(showError));
     document.getElementById('unreviewCurrent').addEventListener('click', () => unreviewCurrent().catch(showError));
+    document.getElementById('openExplain').addEventListener('click', openExplainMenu);
+    document.getElementById('requestExplain').addEventListener('click', (event) => { event.preventDefault(); requestExplainPreview(); });
     document.getElementById('openCommit').addEventListener('click', () => document.getElementById('commitDialog').showModal());
     document.getElementById('publishCurrent').addEventListener('click', () => document.getElementById('publishDialog').showModal());
     document.getElementById('submitPublish').addEventListener('click', (event) => { event.preventDefault(); publishCurrentBranch().catch(showError); });
@@ -1107,6 +1153,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       } else if (event.key === 'y') acceptCurrent().catch(showError);
       else if (event.key === 'x') rejectCurrent().catch(showError);
       else if (event.key === 'u') unreviewCurrent().catch(showError);
+      else if (event.key === 'e') openExplainMenu();
       else if (event.key === 'r') mutate('/api/refresh', 'Refreshed review queue.').catch(showError);
       else if (event.key === 'c') document.getElementById('commitDialog').showModal();
       else if (event.key === 'p') document.getElementById('publishDialog').showModal();
@@ -1122,6 +1169,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
 mod tests {
     use super::*;
     use crate::domain::diff::{DiffLine, DiffLineKind, FileStatus, Hunk};
+
+    #[test]
+    fn web_index_includes_explain_menu_shell() {
+        assert!(INDEX_HTML.contains("id=\"explainDialog\""));
+        assert!(INDEX_HTML.contains("id=\"explainScope\""));
+        assert!(INDEX_HTML.contains("Open Explain menu"));
+    }
 
     #[test]
     fn review_state_counts_hunks_and_no_hunk_files() {
