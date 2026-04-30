@@ -420,77 +420,146 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>better-review web</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 0; min-height: 100vh; background: #0b1020; color: #e5e7eb; }
-    main { max-width: 1180px; margin: 0 auto; padding: 32px; }
-    header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 24px; }
-    h1 { margin: 0; font-size: 28px; letter-spacing: -0.04em; }
-    h2, h3 { letter-spacing: -0.03em; }
-    .muted { color: #94a3b8; }
-    .card { background: #111827; border: 1px solid #253044; border-radius: 18px; padding: 20px; box-shadow: 0 24px 80px rgb(0 0 0 / 0.24); }
-    .counts, .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .pill { border: 1px solid #334155; border-radius: 999px; padding: 8px 12px; background: #0f172a; }
-    .grid { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; gap: 18px; align-items: start; }
-    .files { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
-    .file { display: grid; gap: 10px; padding: 12px; border: 1px solid #263244; border-radius: 14px; background: #0f172a; }
-    .file-header { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; }
-    .icon { color: #60a5fa; font-weight: 800; }
-    .status { font-size: 12px; text-transform: lowercase; color: #94a3b8; }
-    .hunks { display: grid; gap: 8px; margin-top: 4px; }
-    .hunk { border-top: 1px solid #1f2937; padding-top: 8px; display: grid; gap: 8px; }
-    code { color: #bfdbfe; word-break: break-all; }
-    pre { overflow: auto; margin: 0; white-space: pre-wrap; color: #cbd5e1; max-height: 68vh; }
-    button { cursor: pointer; border: 1px solid #334155; color: #e5e7eb; background: #1e293b; padding: 8px 12px; border-radius: 10px; }
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --bg: #0b1020;
+      --surface: #111827;
+      --surface-raised: #172033;
+      --panel: #0f172a;
+      --border: #253044;
+      --muted: #94a3b8;
+      --text: #e5e7eb;
+      --accent: #60a5fa;
+      --accent-dim: #1d4ed8;
+      --green: #22c55e;
+      --red: #ef4444;
+      --yellow: #facc15;
+      --code-add: #052e16;
+      --code-remove: #3f1018;
+      --code-focus: #1e3a8a;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top, #172554 0, var(--bg) 38%); color: var(--text); }
+    button, textarea { font: inherit; }
+    button { cursor: pointer; border: 1px solid #334155; color: var(--text); background: #1e293b; padding: 7px 10px; border-radius: 10px; }
     button:hover { background: #334155; }
     button.primary { border-color: #2563eb; background: #1d4ed8; }
     button.danger { border-color: #7f1d1d; background: #450a0a; }
-    textarea { width: 100%; min-height: 96px; box-sizing: border-box; border-radius: 12px; border: 1px solid #334155; background: #020617; color: #e5e7eb; padding: 12px; }
-    dialog { border: 1px solid #334155; border-radius: 18px; background: #111827; color: #e5e7eb; max-width: 560px; width: calc(100% - 40px); }
+    button.ghost { background: transparent; }
+    code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    .app { min-height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+    .topbar { height: 48px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 18px; border-bottom: 1px solid var(--border); background: rgb(11 16 32 / 0.88); backdrop-filter: blur(12px); }
+    .brand { grid-column: 2; font-weight: 800; letter-spacing: -0.04em; }
+    .brand span { color: var(--accent); }
+    .repo { justify-self: start; color: var(--muted); min-width: 0; max-width: 44vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .counts { justify-self: end; display: flex; gap: 8px; color: var(--muted); }
+    .pill { border: 1px solid #334155; border-radius: 999px; padding: 5px 9px; background: #0f172a; }
+    .workspace { min-height: 0; display: grid; grid-template-columns: minmax(280px, 34vw) minmax(0, 1fr); gap: 12px; padding: 12px; }
+    .panel { min-height: 0; background: rgb(17 24 39 / 0.94); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; box-shadow: 0 24px 80px rgb(0 0 0 / 0.22); }
+    .panel-title { height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--border); color: var(--muted); }
+    .panel-title strong { color: var(--text); }
+    .files { list-style: none; margin: 0; padding: 10px; display: grid; gap: 8px; overflow: auto; max-height: calc(100vh - 160px); }
+    .file { display: grid; grid-template-columns: auto auto 1fr auto; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid transparent; border-radius: 12px; background: var(--panel); color: var(--muted); }
+    .file.selected { border-color: var(--accent); background: #172554; color: var(--text); }
+    .selection-bar { color: var(--accent); font-weight: 900; }
+    .review-marker { color: var(--muted); }
+    .review-marker.accepted { color: var(--green); }
+    .review-marker.rejected { color: var(--red); }
+    .file-icon { color: var(--accent); font-weight: 900; min-width: 1.2em; text-align: center; }
+    .file-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stats { color: var(--muted); white-space: nowrap; font-size: 12px; }
+    .diff-panel { display: grid; grid-template-rows: auto 1fr; }
+    .diff-body { min-height: 0; overflow: auto; }
+    .empty { min-height: 320px; display: grid; place-items: center; text-align: center; color: var(--muted); padding: 30px; }
+    .file-actions, .hunk-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .hunk { border-bottom: 1px solid #1f2937; }
+    .hunk-header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; background: #111827; border-top: 1px solid #1f2937; color: var(--muted); }
+    .hunk.selected .hunk-header { background: #172554; color: var(--text); box-shadow: inset 3px 0 0 var(--accent); }
+    .diff-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    .diff-table td { padding: 0; vertical-align: top; }
+    .line-no { width: 58px; user-select: none; text-align: right; color: #64748b; background: #0b1220; padding: 2px 8px !important; border-right: 1px solid #1f2937; }
+    .line-prefix { width: 24px; text-align: center; color: #94a3b8; }
+    .line-content { white-space: pre-wrap; overflow-wrap: anywhere; padding: 2px 10px !important; }
+    .line-add { background: var(--code-add); }
+    .line-add .line-prefix, .line-add .line-content { color: #bbf7d0; }
+    .line-remove { background: var(--code-remove); }
+    .line-remove .line-prefix, .line-remove .line-content { color: #fecdd3; }
+    .line-context { background: #0f172a; color: #cbd5e1; }
+    .binary-card { margin: 18px; padding: 34px; border: 1px dashed #334155; border-radius: 16px; text-align: center; color: var(--muted); }
+    .footer { min-height: 74px; display: grid; grid-template-rows: auto auto; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--surface-raised); }
+    .footer-main { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .footer-path { color: #bfdbfe; font-weight: 800; }
+    .keybar { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); }
+    .key { color: var(--text); background: #0f172a; border: 1px solid #334155; border-radius: 7px; padding: 2px 6px; }
+    textarea { width: 100%; min-height: 104px; border-radius: 12px; border: 1px solid #334155; background: #020617; color: var(--text); padding: 12px; }
+    dialog { border: 1px solid #334155; border-radius: 18px; background: #111827; color: var(--text); max-width: 560px; width: calc(100% - 40px); }
     dialog::backdrop { background: rgb(0 0 0 / 0.62); }
-    @media (max-width: 920px) { .grid { grid-template-columns: 1fr; } header { flex-direction: column; } }
+    @media (max-width: 920px) { .workspace { grid-template-columns: 1fr; } .files { max-height: 40vh; } .topbar { grid-template-columns: 1fr; height: auto; gap: 6px; padding: 10px 14px; } .brand, .repo, .counts { grid-column: auto; justify-self: start; max-width: 100%; } }
   </style>
 </head>
 <body>
-  <main>
-    <header>
-      <div>
-        <h1>better-review web</h1>
-        <p class="muted">Local browser review mode. Review state and git decisions are handled by the Rust review engine.</p>
-      </div>
-      <div class="actions">
-        <button id="refresh">Refresh</button>
-        <button id="openCommit" class="primary">Commit accepted</button>
-      </div>
-    </header>
-
-    <section class="card" style="margin-bottom: 18px;">
-      <div class="muted">Repository</div>
-      <code id="repo">Loading…</code>
-      <div class="counts" style="margin-top: 14px;">
+  <div class="app">
+    <header class="topbar">
+      <div id="repo" class="repo mono">Loading…</div>
+      <div class="brand"><span>›</span> better-review</div>
+      <div class="counts">
         <span class="pill"><strong id="pending">0</strong> pending</span>
         <span class="pill"><strong id="accepted">0</strong> accepted</span>
         <span class="pill"><strong id="rejected">0</strong> rejected</span>
       </div>
-      <p id="status" class="muted">Loading review state…</p>
-    </section>
+    </header>
 
-    <section class="grid">
-      <div class="card">
-        <h2 style="margin-top: 0;">Files</h2>
-        <ul id="files" class="files"><li class="muted">Loading files…</li></ul>
+    <main class="workspace">
+      <aside class="panel">
+        <div class="panel-title">
+          <span><span class="key">1</span> <strong>Files</strong></span>
+          <button id="refresh" class="ghost">Refresh</button>
+        </div>
+        <ul id="files" class="files"><li class="empty">Loading files…</li></ul>
+      </aside>
+
+      <section class="panel diff-panel">
+        <div class="panel-title">
+          <span><span class="key">2</span> <strong id="diffTitle">Review</strong></span>
+          <div class="file-actions">
+            <button id="acceptCurrent">Accept</button>
+            <button id="rejectCurrent" class="danger">Reject</button>
+            <button id="unreviewCurrent">Unreview</button>
+            <button id="openCommit" class="primary">Commit</button>
+          </div>
+        </div>
+        <div id="diff" class="diff-body"><div class="empty">Loading review state…</div></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="footer-main">
+        <span id="position" class="pill">0 / 0</span>
+        <span id="footerPath" class="footer-path mono">No selection</span>
+        <span id="focusLabel" class="muted">files</span>
+        <span id="lineStats" class="muted">+0 -0</span>
+        <span id="status" class="muted">Loading review state…</span>
       </div>
-      <div class="card">
-        <h2 style="margin-top: 0;">State JSON</h2>
-        <pre id="json">Loading…</pre>
+      <div class="keybar">
+        <span><span class="key">j/k</span> move</span>
+        <span><span class="key">Enter</span> hunks</span>
+        <span><span class="key">Esc</span> files</span>
+        <span><span class="key">Tab</span> next</span>
+        <span><span class="key">y</span> accept</span>
+        <span><span class="key">x</span> reject</span>
+        <span><span class="key">u</span> unreview</span>
+        <span><span class="key">r</span> refresh</span>
+        <span><span class="key">c</span> commit</span>
       </div>
-    </section>
-  </main>
+    </footer>
+  </div>
 
   <dialog id="commitDialog">
     <form method="dialog" style="display: grid; gap: 14px;">
       <h2 style="margin: 0;">Commit accepted changes</h2>
       <textarea id="commitMessage" placeholder="Write the commit message for accepted changes"></textarea>
-      <div class="actions" style="justify-content: flex-end;">
+      <div class="file-actions" style="justify-content: flex-end;">
         <button value="cancel">Cancel</button>
         <button id="submitCommit" class="primary" value="default">Commit</button>
       </div>
@@ -499,7 +568,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
   <script>
     const token = new URLSearchParams(location.search).get('token');
-    let currentState = null;
+    let state = null;
+    let selectedFile = 0;
+    let selectedHunk = 0;
+    let focus = 'files';
 
     const iconFor = (file) => {
       if (file.is_binary) return '◈';
@@ -512,6 +584,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
         default: return file.hunks.length ? '✎' : '○';
       }
     };
+    const markerFor = (status) => status === 'Accepted' ? '[✓]' : status === 'Rejected' ? '[x]' : '[ ]';
+    const prefixFor = (kind) => kind === 'Add' ? '+' : kind === 'Remove' ? '-' : ' ';
+    const lineClass = (kind) => kind === 'Add' ? 'line-add' : kind === 'Remove' ? 'line-remove' : 'line-context';
 
     async function request(path, options = {}) {
       const separator = path.includes('?') ? '&' : '?';
@@ -527,9 +602,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return response.json();
     }
 
-    async function loadState() {
+    async function loadState(message = 'Review state loaded.') {
       renderState(await request('/api/state'));
-      setStatus('Review state loaded.');
+      setStatus(message);
     }
 
     async function mutate(path, message) {
@@ -538,67 +613,150 @@ const INDEX_HTML: &str = r#"<!doctype html>
       setStatus(result.message || message);
     }
 
-    function renderState(state) {
-      currentState = state;
+    function renderState(nextState) {
+      state = nextState;
+      selectedFile = clamp(selectedFile, 0, Math.max(0, state.files.length - 1));
+      const file = currentFile();
+      selectedHunk = clamp(selectedHunk, 0, Math.max(0, (file?.hunks.length || 1) - 1));
+
       document.getElementById('repo').textContent = state.repo_path;
       document.getElementById('pending').textContent = state.counts.unreviewed;
       document.getElementById('accepted').textContent = state.counts.accepted;
       document.getElementById('rejected').textContent = state.counts.rejected;
-      document.getElementById('json').textContent = JSON.stringify(state, null, 2);
+      renderFiles();
+      renderDiff();
+      renderFooter();
+    }
+
+    function renderFiles() {
       const files = document.getElementById('files');
       files.innerHTML = '';
       if (!state.files.length) {
-        files.innerHTML = '<li class="muted">No reviewable changes.</li>';
+        files.innerHTML = '<li class="empty">No reviewable changes.<br><span class="muted">Run your agent, then refresh.</span></li>';
         return;
       }
-      state.files.forEach((file, fileIndex) => files.appendChild(renderFile(file, fileIndex)));
-    }
-
-    function renderFile(file, fileIndex) {
-      const item = document.createElement('li');
-      item.className = 'file';
-      const hunkCount = file.hunks.length;
-      item.innerHTML = `
-        <div class="file-header">
-          <span class="icon">${iconFor(file)}</span>
-          <code></code>
-          <span class="status">${file.review_status}</span>
-        </div>
-        <div class="actions">
-          <button data-action="accept-file">Accept file</button>
-          <button data-action="reject-file" class="danger">Reject file</button>
-          <button data-action="unreview-file">Unreview</button>
-          <span class="muted">${hunkCount} hunks</span>
-        </div>
-        <div class="hunks"></div>`;
-      item.querySelector('code').textContent = file.display_label;
-      item.querySelector('[data-action="accept-file"]').addEventListener('click', () => mutate(`/api/files/${fileIndex}/accept`, 'Accepted file.').catch(showError));
-      item.querySelector('[data-action="reject-file"]').addEventListener('click', () => mutate(`/api/files/${fileIndex}/reject`, 'Rejected file.').catch(showError));
-      item.querySelector('[data-action="unreview-file"]').addEventListener('click', () => mutate(`/api/files/${fileIndex}/unreview`, 'Moved file back to unreviewed.').catch(showError));
-
-      const hunks = item.querySelector('.hunks');
-      file.hunks.forEach((hunk, hunkIndex) => {
-        const row = document.createElement('div');
-        row.className = 'hunk';
-        row.innerHTML = `
-          <code></code>
-          <div class="actions">
-            <span class="status">${hunk.review_status}</span>
-            <button data-action="accept-hunk">Accept hunk</button>
-            <button data-action="reject-hunk" class="danger">Reject hunk</button>
-          </div>`;
-        row.querySelector('code').textContent = hunk.header;
-        row.querySelector('[data-action="accept-hunk"]').addEventListener('click', () => mutate(`/api/files/${fileIndex}/hunks/${hunkIndex}/accept`, 'Accepted hunk.').catch(showError));
-        row.querySelector('[data-action="reject-hunk"]').addEventListener('click', () => mutate(`/api/files/${fileIndex}/hunks/${hunkIndex}/reject`, 'Rejected hunk.').catch(showError));
-        hunks.appendChild(row);
+      state.files.forEach((file, index) => {
+        const item = document.createElement('li');
+        item.className = `file ${index === selectedFile ? 'selected' : ''}`;
+        const stats = lineStats(file);
+        item.innerHTML = `
+          <span class="selection-bar">${index === selectedFile ? '▌' : ' '}</span>
+          <span class="review-marker ${file.review_status.toLowerCase()}">${markerFor(file.review_status)}</span>
+          <span class="file-label"><span class="file-icon">${iconFor(file)}</span> <span class="mono"></span></span>
+          <span class="stats">+${stats.added} -${stats.removed}</span>`;
+        item.querySelector('.mono').textContent = file.display_label;
+        item.addEventListener('click', () => { selectedFile = index; selectedHunk = 0; focus = 'files'; renderState(state); });
+        files.appendChild(item);
       });
-      return item;
     }
 
+    function renderDiff() {
+      const diff = document.getElementById('diff');
+      const title = document.getElementById('diffTitle');
+      const file = currentFile();
+      diff.innerHTML = '';
+      if (!file) {
+        title.textContent = 'Review';
+        diff.innerHTML = '<div class="empty">No changes to review.</div>';
+        return;
+      }
+
+      title.textContent = file.display_label;
+      if (file.is_binary || !file.hunks.length) {
+        diff.innerHTML = `<div class="binary-card"><h2>${file.is_binary ? 'Binary file' : 'No text hunks'}</h2><p>${file.is_binary ? 'This change cannot be shown as a text diff.' : 'This file changed, but there is no patch body to render.'}</p></div>`;
+        return;
+      }
+
+      file.hunks.forEach((hunk, hunkIndex) => {
+        const section = document.createElement('section');
+        section.className = `hunk ${focus === 'hunks' && hunkIndex === selectedHunk ? 'selected' : ''}`;
+        section.innerHTML = `
+          <div class="hunk-header">
+            <code></code>
+            <div class="hunk-actions">
+              <span class="review-marker ${hunk.review_status.toLowerCase()}">${markerFor(hunk.review_status)}</span>
+              <button data-action="accept-hunk">Accept</button>
+              <button data-action="reject-hunk" class="danger">Reject</button>
+            </div>
+          </div>
+          <table class="diff-table"><tbody></tbody></table>`;
+        section.querySelector('code').textContent = hunk.header;
+        section.querySelector('[data-action="accept-hunk"]').addEventListener('click', () => mutate(`/api/files/${selectedFile}/hunks/${hunkIndex}/accept`, 'Accepted hunk.').catch(showError));
+        section.querySelector('[data-action="reject-hunk"]').addEventListener('click', () => mutate(`/api/files/${selectedFile}/hunks/${hunkIndex}/reject`, 'Rejected hunk.').catch(showError));
+        const body = section.querySelector('tbody');
+        hunk.lines.forEach((line) => body.appendChild(renderDiffLine(line)));
+        diff.appendChild(section);
+      });
+      scrollSelectedHunkIntoView();
+    }
+
+    function renderDiffLine(line) {
+      const row = document.createElement('tr');
+      row.className = lineClass(line.kind);
+      row.innerHTML = `
+        <td class="line-no">${line.old_line ?? ''}</td>
+        <td class="line-no">${line.new_line ?? ''}</td>
+        <td class="line-prefix">${prefixFor(line.kind)}</td>
+        <td class="line-content"></td>`;
+      row.querySelector('.line-content').textContent = line.content;
+      return row;
+    }
+
+    function renderFooter() {
+      const file = currentFile();
+      document.getElementById('position').textContent = `${state.files.length ? selectedFile + 1 : 0} / ${state.files.length}`;
+      document.getElementById('footerPath').textContent = file ? file.display_label : 'No selection';
+      document.getElementById('focusLabel').textContent = file && focus === 'hunks' ? `hunk ${selectedHunk + 1}/${Math.max(file.hunks.length, 1)}` : 'file';
+      const stats = file ? lineStats(file) : { added: 0, removed: 0 };
+      document.getElementById('lineStats').textContent = `+${stats.added} -${stats.removed}`;
+    }
+
+    function lineStats(file) {
+      return file.hunks.reduce((stats, hunk) => {
+        hunk.lines.forEach((line) => {
+          if (line.kind === 'Add') stats.added += 1;
+          if (line.kind === 'Remove') stats.removed += 1;
+        });
+        return stats;
+      }, { added: 0, removed: 0 });
+    }
+
+    function currentFile() { return state?.files[selectedFile]; }
+    function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
     function setStatus(message) { document.getElementById('status').textContent = message; }
-    function showError(error) { setStatus(error.message); document.getElementById('json').textContent = error.message; }
+    function showError(error) { setStatus(error.message); }
+    function scrollSelectedHunkIntoView() {
+      if (focus !== 'hunks') return;
+      document.querySelector('.hunk.selected')?.scrollIntoView({ block: 'nearest' });
+    }
+
+    async function acceptCurrent() {
+      const file = currentFile();
+      if (!file) return;
+      if (focus === 'hunks' && file.hunks.length) {
+        await mutate(`/api/files/${selectedFile}/hunks/${selectedHunk}/accept`, 'Accepted hunk.');
+      } else {
+        await mutate(`/api/files/${selectedFile}/accept`, 'Accepted file.');
+      }
+    }
+    async function rejectCurrent() {
+      const file = currentFile();
+      if (!file) return;
+      if (focus === 'hunks' && file.hunks.length) {
+        await mutate(`/api/files/${selectedFile}/hunks/${selectedHunk}/reject`, 'Rejected hunk.');
+      } else {
+        await mutate(`/api/files/${selectedFile}/reject`, 'Rejected file.');
+      }
+    }
+    async function unreviewCurrent() {
+      if (!currentFile()) return;
+      await mutate(`/api/files/${selectedFile}/unreview`, 'Moved file back to unreviewed.');
+    }
 
     document.getElementById('refresh').addEventListener('click', () => mutate('/api/refresh', 'Refreshed review queue.').catch(showError));
+    document.getElementById('acceptCurrent').addEventListener('click', () => acceptCurrent().catch(showError));
+    document.getElementById('rejectCurrent').addEventListener('click', () => rejectCurrent().catch(showError));
+    document.getElementById('unreviewCurrent').addEventListener('click', () => unreviewCurrent().catch(showError));
     document.getElementById('openCommit').addEventListener('click', () => document.getElementById('commitDialog').showModal());
     document.getElementById('submitCommit').addEventListener('click', async (event) => {
       event.preventDefault();
@@ -609,9 +767,32 @@ const INDEX_HTML: &str = r#"<!doctype html>
         document.getElementById('commitMessage').value = '';
         renderState(result.state);
         setStatus(result.message);
-      } catch (error) {
-        showError(error);
-      }
+      } catch (error) { showError(error); }
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.target.closest('textarea, dialog')) return;
+      const file = currentFile();
+      if (event.key === 'j' || event.key === 'ArrowDown') {
+        if (focus === 'hunks' && file?.hunks.length) selectedHunk = clamp(selectedHunk + 1, 0, file.hunks.length - 1);
+        else { selectedFile = clamp(selectedFile + 1, 0, Math.max(0, (state?.files.length || 1) - 1)); selectedHunk = 0; }
+        renderState(state); event.preventDefault();
+      } else if (event.key === 'k' || event.key === 'ArrowUp') {
+        if (focus === 'hunks' && file?.hunks.length) selectedHunk = clamp(selectedHunk - 1, 0, file.hunks.length - 1);
+        else { selectedFile = clamp(selectedFile - 1, 0, Math.max(0, (state?.files.length || 1) - 1)); selectedHunk = 0; }
+        renderState(state); event.preventDefault();
+      } else if (event.key === 'Enter') {
+        if (file?.hunks.length) focus = 'hunks'; renderState(state); event.preventDefault();
+      } else if (event.key === 'Escape') {
+        focus = 'files'; renderState(state); event.preventDefault();
+      } else if (event.key === 'Tab') {
+        if (file?.hunks.length) { selectedHunk = (selectedHunk + 1) % file.hunks.length; focus = 'hunks'; renderState(state); }
+        event.preventDefault();
+      } else if (event.key === 'y') acceptCurrent().catch(showError);
+      else if (event.key === 'x') rejectCurrent().catch(showError);
+      else if (event.key === 'u') unreviewCurrent().catch(showError);
+      else if (event.key === 'r') mutate('/api/refresh', 'Refreshed review queue.').catch(showError);
+      else if (event.key === 'c') document.getElementById('commitDialog').showModal();
     });
 
     loadState().catch(showError);
