@@ -456,6 +456,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .counts { justify-self: end; display: flex; gap: 8px; color: var(--muted); }
     .pill { border: 1px solid #334155; border-radius: 999px; padding: 5px 9px; background: #0f172a; }
     .workspace { min-height: 0; display: grid; grid-template-columns: minmax(280px, 34vw) minmax(0, 1fr); gap: 12px; padding: 12px; }
+    .hidden { display: none !important; }
+    .home { min-height: 0; display: grid; place-items: center; padding: 40px 18px; }
+    .home-card { width: min(760px, 100%); background: rgb(17 24 39 / 0.94); border: 1px solid var(--border); border-radius: 24px; padding: 32px; box-shadow: 0 24px 80px rgb(0 0 0 / 0.24); }
+    .home-kicker { color: var(--muted); text-transform: uppercase; letter-spacing: 0.16em; font-size: 12px; }
+    .home-title { margin: 10px 0 8px; font-size: clamp(32px, 6vw, 64px); line-height: 0.95; letter-spacing: -0.08em; }
+    .home-title span { color: var(--accent); }
+    .home-detail { color: var(--muted); font-size: 17px; max-width: 58ch; }
+    .home-progress { margin: 24px 0; display: grid; gap: 10px; }
+    .progress-track { height: 12px; border-radius: 999px; overflow: hidden; background: #020617; border: 1px solid #334155; }
+    .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--green)); transition: width 180ms ease; }
+    .home-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
     .panel { min-height: 0; background: rgb(17 24 39 / 0.94); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; box-shadow: 0 24px 80px rgb(0 0 0 / 0.22); }
     .panel-title { height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 14px; border-bottom: 1px solid var(--border); color: var(--muted); }
     .panel-title strong { color: var(--text); }
@@ -510,7 +521,25 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
     </header>
 
-    <main class="workspace">
+    <section id="home" class="home">
+      <div class="home-card">
+        <div class="home-kicker">AI writes the code. You review it.</div>
+        <h1 id="homeTitle" class="home-title">Loading <span>review</span></h1>
+        <p id="homeDetail" class="home-detail">Loading the current worktree state.</p>
+        <div class="home-progress">
+          <div class="progress-track"><div id="homeProgress" class="progress-fill"></div></div>
+          <div id="homeCounts" class="muted">0 pending · 0 accepted · 0 rejected</div>
+        </div>
+        <div class="home-actions">
+          <button id="enterReview" class="primary">Enter review</button>
+          <button id="homeRefresh">Refresh</button>
+          <button id="homeCommit">Commit accepted</button>
+        </div>
+        <p id="homeStatus" class="muted">Press r to refresh or Enter to review when changes exist.</p>
+      </div>
+    </section>
+
+    <main id="workspace" class="workspace hidden">
       <aside class="panel">
         <div class="panel-title">
           <span><span class="key">1</span> <strong>Files</strong></span>
@@ -533,7 +562,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </section>
     </main>
 
-    <footer class="footer">
+    <footer id="footer" class="footer hidden">
       <div class="footer-main">
         <span id="position" class="pill">0 / 0</span>
         <span id="footerPath" class="footer-path mono">No selection</span>
@@ -572,6 +601,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let selectedFile = 0;
     let selectedHunk = 0;
     let focus = 'files';
+    let screen = 'home';
 
     const iconFor = (file) => {
       if (file.is_binary) return '◈';
@@ -623,9 +653,50 @@ const INDEX_HTML: &str = r#"<!doctype html>
       document.getElementById('pending').textContent = state.counts.unreviewed;
       document.getElementById('accepted').textContent = state.counts.accepted;
       document.getElementById('rejected').textContent = state.counts.rejected;
+      if (!state.files.length) screen = 'home';
+      renderHome();
       renderFiles();
       renderDiff();
       renderFooter();
+      renderLayout();
+    }
+
+    function renderLayout() {
+      const onHome = screen === 'home';
+      document.getElementById('home').classList.toggle('hidden', !onHome);
+      document.getElementById('workspace').classList.toggle('hidden', onHome);
+      document.getElementById('footer').classList.toggle('hidden', onHome);
+    }
+
+    function renderHome() {
+      const total = state.counts.unreviewed + state.counts.accepted + state.counts.rejected;
+      const reviewed = state.counts.accepted + state.counts.rejected;
+      const progress = total ? Math.round((reviewed / total) * 100) : 0;
+      let title = 'No changes';
+      let detail = 'Run your coding agent or make changes, then refresh the review queue.';
+      if (total && state.counts.unreviewed) {
+        title = 'Ready to review';
+        detail = 'Open the review workspace and accept only the file or hunk changes that belong.';
+      } else if (state.counts.accepted) {
+        title = 'Ready to commit';
+        detail = 'All current review items have a decision. Commit accepted staged changes when ready.';
+      } else if (total) {
+        title = 'Nothing accepted';
+        detail = 'Rejected changes stay in your worktree and are left out of the commit.';
+      }
+      document.getElementById('homeTitle').innerHTML = `${title.replace('review', '<span>review</span>')}`;
+      document.getElementById('homeDetail').textContent = detail;
+      document.getElementById('homeProgress').style.width = `${progress}%`;
+      document.getElementById('homeCounts').textContent = `${state.counts.unreviewed} pending · ${state.counts.accepted} accepted · ${state.counts.rejected} rejected`;
+      document.getElementById('enterReview').disabled = !state.files.length;
+    }
+
+    function enterReview() {
+      if (!state?.files.length) { setStatus('No reviewable changes yet. Refresh after making changes.'); return; }
+      screen = 'review';
+      focus = 'files';
+      renderState(state);
+      setStatus('Review workspace ready.');
     }
 
     function renderFiles() {
@@ -645,7 +716,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <span class="file-label"><span class="file-icon">${iconFor(file)}</span> <span class="mono"></span></span>
           <span class="stats">+${stats.added} -${stats.removed}</span>`;
         item.querySelector('.mono').textContent = file.display_label;
-        item.addEventListener('click', () => { selectedFile = index; selectedHunk = 0; focus = 'files'; renderState(state); });
+        item.addEventListener('click', () => { selectedFile = index; selectedHunk = 0; focus = 'files'; screen = 'review'; renderState(state); });
         files.appendChild(item);
       });
     }
@@ -723,7 +794,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     function currentFile() { return state?.files[selectedFile]; }
     function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
-    function setStatus(message) { document.getElementById('status').textContent = message; }
+    function setStatus(message) { document.getElementById('status').textContent = message; document.getElementById('homeStatus').textContent = message; }
     function showError(error) { setStatus(error.message); }
     function scrollSelectedHunkIntoView() {
       if (focus !== 'hunks') return;
@@ -754,6 +825,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     document.getElementById('refresh').addEventListener('click', () => mutate('/api/refresh', 'Refreshed review queue.').catch(showError));
+    document.getElementById('homeRefresh').addEventListener('click', () => mutate('/api/refresh', 'Refreshed review queue.').catch(showError));
+    document.getElementById('enterReview').addEventListener('click', enterReview);
+    document.getElementById('homeCommit').addEventListener('click', () => document.getElementById('commitDialog').showModal());
     document.getElementById('acceptCurrent').addEventListener('click', () => acceptCurrent().catch(showError));
     document.getElementById('rejectCurrent').addEventListener('click', () => rejectCurrent().catch(showError));
     document.getElementById('unreviewCurrent').addEventListener('click', () => unreviewCurrent().catch(showError));
@@ -773,6 +847,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
     document.addEventListener('keydown', (event) => {
       if (event.target.closest('textarea, dialog')) return;
       const file = currentFile();
+      if (screen === 'home') {
+        if (event.key === 'Enter') { enterReview(); event.preventDefault(); }
+        else if (event.key === 'r') { mutate('/api/refresh', 'Refreshed review queue.').catch(showError); event.preventDefault(); }
+        else if (event.key === 'c') { document.getElementById('commitDialog').showModal(); event.preventDefault(); }
+        return;
+      }
       if (event.key === 'j' || event.key === 'ArrowDown') {
         if (focus === 'hunks' && file?.hunks.length) selectedHunk = clamp(selectedHunk + 1, 0, file.hunks.length - 1);
         else { selectedFile = clamp(selectedFile + 1, 0, Math.max(0, (state?.files.length || 1) - 1)); selectedHunk = 0; }
@@ -784,7 +864,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       } else if (event.key === 'Enter') {
         if (file?.hunks.length) focus = 'hunks'; renderState(state); event.preventDefault();
       } else if (event.key === 'Escape') {
-        focus = 'files'; renderState(state); event.preventDefault();
+        if (focus === 'hunks') focus = 'files'; else screen = 'home'; renderState(state); event.preventDefault();
       } else if (event.key === 'Tab') {
         if (file?.hunks.length) { selectedHunk = (selectedHunk + 1) % file.hunks.length; focus = 'hunks'; renderState(state); }
         event.preventDefault();
