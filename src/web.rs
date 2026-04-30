@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 
 use crate::domain::diff::{FileDiff, Hunk, ReviewStatus};
 use crate::services::git::{GitService, PushFailure};
+use crate::services::opencode::{OpencodeService, OpencodeSession};
 use crate::settings::{AppSettings, SettingsStore};
 
 pub async fn run() -> Result<()> {
@@ -25,13 +26,21 @@ pub async fn run() -> Result<()> {
     let settings = settings_store
         .load()
         .unwrap_or_else(|_| AppSettings::default());
+    let opencode = OpencodeService::new(&repo_path).ok();
+    let sessions = load_web_sessions(opencode.as_ref());
+    let selected_session_id = sessions.first().map(|session| session.id.clone());
     let token = local_session_token();
     let state = Arc::new(WebState {
         git,
         repo_path,
         token,
+        opencode,
         settings_store,
         settings: Mutex::new(settings),
+        explain: Mutex::new(WebExplainState {
+            sessions,
+            selected_session_id,
+        }),
         review: Mutex::new(WebReviewState {
             files,
             had_staged_changes_on_open,
@@ -44,6 +53,8 @@ pub async fn run() -> Result<()> {
         .route("/api/refresh", post(api_refresh))
         .route("/api/settings", get(api_settings))
         .route("/api/settings/github-token", post(api_save_github_token))
+        .route("/api/explain/sessions", get(api_explain_sessions))
+        .route("/api/explain/session", post(api_select_explain_session))
         .route("/api/commit", post(api_commit))
         .route("/api/push", post(api_push))
         .route("/api/files/:file_index/accept", post(api_accept_file))
@@ -83,14 +94,21 @@ struct WebState {
     git: GitService,
     repo_path: PathBuf,
     token: String,
+    opencode: Option<OpencodeService>,
     settings_store: SettingsStore,
     settings: Mutex<AppSettings>,
+    explain: Mutex<WebExplainState>,
     review: Mutex<WebReviewState>,
 }
 
 struct WebReviewState {
     files: Vec<FileDiff>,
     had_staged_changes_on_open: bool,
+}
+
+struct WebExplainState {
+    sessions: Vec<WebSessionResponse>,
+    selected_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +131,26 @@ struct CommitRequest {
 #[derive(Debug, Deserialize)]
 struct GitHubTokenRequest {
     token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExplainSessionRequest {
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct WebSessionResponse {
+    id: String,
+    title: String,
+    directory: String,
+    time_updated: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct ExplainSessionsResponse {
+    available: bool,
+    selected_session_id: Option<String>,
+    sessions: Vec<WebSessionResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,6 +234,40 @@ async fn api_save_github_token(
     settings.github.token = if token.is_empty() { None } else { Some(token) };
     state.settings_store.save(&settings)?;
     Ok(Json(settings_response(&settings)))
+}
+
+async fn api_explain_sessions(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+) -> Result<Json<ExplainSessionsResponse>, ApiError> {
+    ensure_authorized(&state, auth)?;
+    refresh_explain_sessions(&state).await;
+    let explain = state.explain.lock().await;
+    Ok(Json(explain_sessions_response(&state, &explain)))
+}
+
+async fn api_select_explain_session(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+    Json(payload): Json<ExplainSessionRequest>,
+) -> Result<Json<ExplainSessionsResponse>, ApiError> {
+    ensure_authorized(&state, auth)?;
+    refresh_explain_sessions(&state).await;
+    let mut explain = state.explain.lock().await;
+    match payload.session_id {
+        Some(session_id) => {
+            if !explain
+                .sessions
+                .iter()
+                .any(|session| session.id == session_id)
+            {
+                return Err(ApiError::not_found("Explain session was not found"));
+            }
+            explain.selected_session_id = Some(session_id);
+        }
+        None => explain.selected_session_id = None,
+    }
+    Ok(Json(explain_sessions_response(&state, &explain)))
 }
 
 async fn api_accept_file(
@@ -328,6 +400,45 @@ fn ensure_authorized(state: &WebState, auth: AuthQuery) -> Result<(), ApiError> 
     }
 }
 
+async fn refresh_explain_sessions(state: &WebState) {
+    let Some(opencode) = &state.opencode else {
+        return;
+    };
+    let Ok(sessions) = opencode.list_repo_sessions() else {
+        return;
+    };
+    let mut explain = state.explain.lock().await;
+    explain.sessions = sessions.into_iter().map(WebSessionResponse::from).collect();
+    if let Some(selected) = &explain.selected_session_id
+        && !explain
+            .sessions
+            .iter()
+            .any(|session| &session.id == selected)
+    {
+        explain.selected_session_id = explain.sessions.first().map(|session| session.id.clone());
+    }
+}
+
+fn load_web_sessions(opencode: Option<&OpencodeService>) -> Vec<WebSessionResponse> {
+    opencode
+        .and_then(|service| service.list_repo_sessions().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(WebSessionResponse::from)
+        .collect()
+}
+
+fn explain_sessions_response(
+    state: &WebState,
+    explain: &WebExplainState,
+) -> ExplainSessionsResponse {
+    ExplainSessionsResponse {
+        available: state.opencode.is_some(),
+        selected_session_id: explain.selected_session_id.clone(),
+        sessions: explain.sessions.clone(),
+    }
+}
+
 fn settings_response(settings: &AppSettings) -> SettingsResponse {
     SettingsResponse {
         has_github_token: settings.github.token.is_some(),
@@ -402,6 +513,17 @@ fn bump_count(counts: &mut ReviewCountsResponse, status: &ReviewStatus) {
         ReviewStatus::Unreviewed => counts.unreviewed += 1,
         ReviewStatus::Accepted => counts.accepted += 1,
         ReviewStatus::Rejected => counts.rejected += 1,
+    }
+}
+
+impl From<OpencodeSession> for WebSessionResponse {
+    fn from(session: OpencodeSession) -> Self {
+        Self {
+            id: session.id,
+            title: session.title,
+            directory: session.directory.display().to_string(),
+            time_updated: session.time_updated,
+        }
     }
 }
 
@@ -591,6 +713,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .palette-item.selected { background: #172554; color: var(--text); }
     .palette-item.disabled { opacity: 0.45; }
     .palette-detail { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .session-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; max-height: 360px; overflow: auto; }
+    .session-item { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid #263244; border-radius: 12px; background: #0f172a; }
+    .session-item.selected { border-color: var(--accent); background: #172554; }
     @media (max-width: 920px) { .workspace { grid-template-columns: 1fr; } .files { max-height: 40vh; } .topbar { grid-template-columns: 1fr; height: auto; gap: 6px; padding: 10px 14px; } .brand, .repo, .counts { grid-column: auto; justify-self: start; max-width: 100%; } }
   </style>
 </head>
@@ -696,15 +821,27 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </div>
       <div>
         <div class="muted">Context</div>
-        <p class="muted" style="margin: 4px 0 0;">Session context selection is coming in the next phase.</p>
+        <p id="explainContext" class="muted" style="margin: 4px 0 0;">Loading context source…</p>
       </div>
       <div>
         <div class="muted">Answer</div>
         <p id="explainAnswer" class="muted" style="margin: 4px 0 0;">No explanation has been requested yet.</p>
       </div>
       <div class="file-actions" style="justify-content: flex-end;">
+        <button id="chooseExplainContext" value="default">Choose context</button>
         <button value="cancel">Close</button>
         <button id="requestExplain" class="primary" value="default">Explain</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="sessionDialog">
+    <form method="dialog" style="display: grid; gap: 14px;">
+      <h2 style="margin: 0;">Choose Explain context</h2>
+      <p id="sessionStatus" class="muted">Loading sessions…</p>
+      <ul id="sessionList" class="session-list"></ul>
+      <div class="file-actions" style="justify-content: flex-end;">
+        <button value="cancel">Close</button>
       </div>
     </form>
   </dialog>
@@ -747,6 +884,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let screen = 'home';
     let paletteCursor = 0;
     let settings = { has_github_token: false };
+    let explainSessions = { available: false, selected_session_id: null, sessions: [] };
 
     const iconFor = (file) => {
       if (file.is_binary) return '◈';
@@ -778,6 +916,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         { label: 'Reject selection', detail: 'Leave the current file or hunk out of the commit', shortcut: 'x', enabled: inReview, run: rejectCurrent },
         { label: 'Move file to unreviewed', detail: 'Unstage the current file and mark it pending', shortcut: 'u', enabled: inReview, run: unreviewCurrent },
         { label: 'Open Explain menu', detail: 'Preview the current file or hunk explanation target', shortcut: 'e', enabled: inReview, run: openExplainMenu },
+        { label: 'Choose Explain context', detail: 'Select the opencode session used for Explain', shortcut: 'o', enabled: true, run: openSessionPicker },
         { label: 'Commit accepted changes', detail: 'Write a commit message for accepted changes', shortcut: 'c', enabled: reviewAvailable, run: () => document.getElementById('commitDialog').showModal() },
         { label: 'Publish current branch', detail: 'Push the reviewed commit from the current branch', shortcut: 'p', enabled: true, run: () => document.getElementById('publishDialog').showModal() },
         { label: 'Open settings', detail: 'Configure GitHub token for HTTPS publishing', shortcut: 's', enabled: true, run: openSettings },
@@ -842,7 +981,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     async function loadState(message = 'Review state loaded.') {
       settings = await request('/api/settings');
+      explainSessions = await request('/api/explain/sessions');
       renderSettingsStatus();
+      renderExplainContext();
       renderState(await request('/api/state'));
       setStatus(message);
     }
@@ -884,6 +1025,66 @@ const INDEX_HTML: &str = r#"<!doctype html>
       setStatus(result.message);
     }
 
+    function selectedExplainSession() {
+      return explainSessions.sessions.find((session) => session.id === explainSessions.selected_session_id);
+    }
+
+    function explainContextLabel() {
+      if (!explainSessions.available) return 'Explain is unavailable because opencode is not ready.';
+      const session = selectedExplainSession();
+      if (!session) return 'No context source selected.';
+      return `${session.title} (${session.id})`;
+    }
+
+    function renderExplainContext() {
+      const context = document.getElementById('explainContext');
+      if (context) context.textContent = explainContextLabel();
+    }
+
+    async function openSessionPicker() {
+      explainSessions = await request('/api/explain/sessions');
+      renderExplainContext();
+      renderSessionList();
+      document.getElementById('sessionDialog').showModal();
+      setStatus('Choose an Explain context source.');
+    }
+
+    function renderSessionList() {
+      const status = document.getElementById('sessionStatus');
+      const list = document.getElementById('sessionList');
+      list.innerHTML = '';
+      if (!explainSessions.available) {
+        status.textContent = 'Explain is unavailable because opencode is not ready.';
+        return;
+      }
+      if (!explainSessions.sessions.length) {
+        status.textContent = 'No opencode sessions were found for this repository.';
+        return;
+      }
+      status.textContent = 'Select the opencode session to use as Explain context.';
+      explainSessions.sessions.forEach((session) => {
+        const row = document.createElement('li');
+        row.className = `session-item ${session.id === explainSessions.selected_session_id ? 'selected' : ''}`;
+        row.innerHTML = '<strong></strong><span class="muted mono"></span><span class="muted"></span>';
+        row.querySelector('strong').textContent = session.title || session.id;
+        row.querySelector('.mono').textContent = session.id;
+        row.querySelectorAll('.muted')[1].textContent = session.directory;
+        row.addEventListener('click', () => selectExplainSession(session.id).catch(showError));
+        list.appendChild(row);
+      });
+    }
+
+    async function selectExplainSession(sessionId) {
+      explainSessions = await request('/api/explain/session', {
+        method: 'POST',
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      renderExplainContext();
+      renderSessionList();
+      document.getElementById('sessionDialog').close();
+      setStatus(`Explain will use context source ${explainContextLabel()}.`);
+    }
+
     function explainTargetLabel() {
       const file = currentFile();
       if (!file) return 'No selection';
@@ -891,8 +1092,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return `file ${file.display_label}`;
     }
 
-    function openExplainMenu() {
+    async function openExplainMenu() {
+      explainSessions = await request('/api/explain/sessions');
       document.getElementById('explainScope').textContent = explainTargetLabel();
+      renderExplainContext();
       document.getElementById('explainAnswer').textContent = 'No explanation has been requested yet.';
       document.getElementById('explainDialog').showModal();
       setStatus('Explain menu opened.');
@@ -1092,7 +1295,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     document.getElementById('acceptCurrent').addEventListener('click', () => acceptCurrent().catch(showError));
     document.getElementById('rejectCurrent').addEventListener('click', () => rejectCurrent().catch(showError));
     document.getElementById('unreviewCurrent').addEventListener('click', () => unreviewCurrent().catch(showError));
-    document.getElementById('openExplain').addEventListener('click', openExplainMenu);
+    document.getElementById('openExplain').addEventListener('click', () => openExplainMenu().catch(showError));
+    document.getElementById('chooseExplainContext').addEventListener('click', (event) => { event.preventDefault(); openSessionPicker().catch(showError); });
     document.getElementById('requestExplain').addEventListener('click', (event) => { event.preventDefault(); requestExplainPreview(); });
     document.getElementById('openCommit').addEventListener('click', () => document.getElementById('commitDialog').showModal());
     document.getElementById('publishCurrent').addEventListener('click', () => document.getElementById('publishDialog').showModal());
@@ -1133,6 +1337,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         else if (event.key === 'c') { document.getElementById('commitDialog').showModal(); event.preventDefault(); }
         else if (event.key === 'p') { document.getElementById('publishDialog').showModal(); event.preventDefault(); }
         else if (event.key === 's') { openSettings().catch(showError); event.preventDefault(); }
+        else if (event.key === 'o') { openSessionPicker().catch(showError); event.preventDefault(); }
         return;
       }
       if (event.key === 'j' || event.key === 'ArrowDown') {
@@ -1153,7 +1358,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       } else if (event.key === 'y') acceptCurrent().catch(showError);
       else if (event.key === 'x') rejectCurrent().catch(showError);
       else if (event.key === 'u') unreviewCurrent().catch(showError);
-      else if (event.key === 'e') openExplainMenu();
+      else if (event.key === 'e') openExplainMenu().catch(showError);
+      else if (event.key === 'o') openSessionPicker().catch(showError);
       else if (event.key === 'r') mutate('/api/refresh', 'Refreshed review queue.').catch(showError);
       else if (event.key === 'c') document.getElementById('commitDialog').showModal();
       else if (event.key === 'p') document.getElementById('publishDialog').showModal();
@@ -1216,6 +1422,42 @@ mod tests {
                 rejected: 1,
             }
         );
+    }
+
+    #[test]
+    fn explain_sessions_response_reflects_availability_and_selection() {
+        let state = WebState {
+            git: GitService::new("."),
+            repo_path: PathBuf::from("."),
+            token: "token".to_string(),
+            opencode: None,
+            settings_store: SettingsStore::from_path(PathBuf::from(
+                "/tmp/better-review-web-test.json",
+            )),
+            settings: Mutex::new(AppSettings::default()),
+            explain: Mutex::new(WebExplainState {
+                sessions: Vec::new(),
+                selected_session_id: None,
+            }),
+            review: Mutex::new(WebReviewState {
+                files: Vec::new(),
+                had_staged_changes_on_open: false,
+            }),
+        };
+        let explain = WebExplainState {
+            sessions: vec![WebSessionResponse {
+                id: "ses_1".to_string(),
+                title: "Session one".to_string(),
+                directory: "/repo".to_string(),
+                time_updated: 42,
+            }],
+            selected_session_id: Some("ses_1".to_string()),
+        };
+
+        let response = explain_sessions_response(&state, &explain);
+        assert!(!response.available);
+        assert_eq!(response.selected_session_id, Some("ses_1".to_string()));
+        assert_eq!(response.sessions[0].title, "Session one");
     }
 
     #[test]
