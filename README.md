@@ -193,6 +193,21 @@ If `opencode` is unavailable, the rest of `better-review` still works normally.
 
 Single-letter command keybindings can be changed from Settings. Each letter can be assigned to only one command.
 
+## File Status Icons
+
+The review sidebar uses compact icons to make change types easier to scan:
+
+| Icon | Meaning |
+| --- | --- |
+| `◈` | Binary file |
+| `+` | Added file |
+| `−` | Deleted file |
+| `✎` | Modified text file |
+| `○` | Changed file with no textual hunks |
+| `→` | Renamed file |
+| `⧉` | Copied file |
+| `⚙` | Mode or metadata change |
+
 ## Repository Support
 
 The current implementation is tested against these repository states:
@@ -203,7 +218,7 @@ The current implementation is tested against these repository states:
 - partially staged files
 - detached `HEAD`
 - linked worktrees
-- rename detection in diffs
+- rename and copy detection in diffs
 - file mode-only changes
 - pre-commit hook failures
 - commit failures caused by merge conflicts
@@ -212,7 +227,7 @@ Current limitations:
 
 - submodules are not a first-class review surface
 - sparse checkout and unusual index/worktree setups are not explicitly supported
-- binary, rename, and copy diffs are recognized, but their UI treatment is still basic
+- binary diffs are recognized, but their preview is still intentionally basic
 
 ## FAQ
 
