@@ -1,20 +1,26 @@
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::domain::diff::{FileDiff, Hunk, ReviewStatus};
 use crate::services::git::{GitService, PushFailure};
-use crate::services::opencode::{OpencodeService, OpencodeSession};
+use crate::services::opencode::{
+    OpencodeService, OpencodeSession, why_target_for_file, why_target_for_hunk,
+};
 use crate::settings::{AppSettings, SettingsStore};
 
 pub async fn run() -> Result<()> {
@@ -29,6 +35,7 @@ pub async fn run() -> Result<()> {
     let opencode = OpencodeService::new(&repo_path).ok();
     let sessions = load_web_sessions(opencode.as_ref());
     let selected_session_id = sessions.first().map(|session| session.id.clone());
+    let (events, _) = broadcast::channel(64);
     let token = local_session_token();
     let state = Arc::new(WebState {
         git,
@@ -37,12 +44,14 @@ pub async fn run() -> Result<()> {
         opencode,
         settings_store,
         settings: Mutex::new(settings),
+        events,
         explain: Mutex::new(WebExplainState {
             sessions,
             selected_session_id,
             models: Vec::new(),
             selected_model: None,
             history: Vec::new(),
+            next_history_id: 1,
         }),
         review: Mutex::new(WebReviewState {
             files,
@@ -53,6 +62,7 @@ pub async fn run() -> Result<()> {
     let router = Router::new()
         .route("/", get(index))
         .route("/api/state", get(api_state))
+        .route("/api/events", get(api_events))
         .route("/api/refresh", post(api_refresh))
         .route("/api/settings", get(api_settings))
         .route("/api/settings/github-token", post(api_save_github_token))
@@ -61,6 +71,7 @@ pub async fn run() -> Result<()> {
         .route("/api/explain/models", get(api_explain_models))
         .route("/api/explain/model", post(api_select_explain_model))
         .route("/api/explain/history", get(api_explain_history))
+        .route("/api/explain", post(api_request_explain))
         .route("/api/commit", post(api_commit))
         .route("/api/push", post(api_push))
         .route("/api/files/:file_index/accept", post(api_accept_file))
@@ -103,6 +114,7 @@ struct WebState {
     opencode: Option<OpencodeService>,
     settings_store: SettingsStore,
     settings: Mutex<AppSettings>,
+    events: broadcast::Sender<WebEvent>,
     explain: Mutex<WebExplainState>,
     review: Mutex<WebReviewState>,
 }
@@ -118,6 +130,7 @@ struct WebExplainState {
     models: Vec<String>,
     selected_model: Option<String>,
     history: Vec<WebExplainHistoryItem>,
+    next_history_id: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +163,12 @@ struct ExplainSessionRequest {
 #[derive(Debug, Deserialize)]
 struct ExplainModelRequest {
     model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExplainRequest {
+    file_index: usize,
+    hunk_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -185,6 +204,20 @@ struct ExplainModelsResponse {
 #[derive(Debug, Serialize)]
 struct ExplainHistoryResponse {
     runs: Vec<WebExplainHistoryItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExplainStartResponse {
+    id: u64,
+    label: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WebEvent {
+    kind: String,
+    message: String,
+    run_id: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -231,6 +264,21 @@ async fn api_state(
         &state.repo_path,
         review.files.clone(),
     )))
+}
+
+async fn api_events(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    ensure_authorized(&state, auth)?;
+    let stream = BroadcastStream::new(state.events.subscribe()).filter_map(|event| {
+        event.ok().map(|event| {
+            let payload = serde_json::to_string(&event)
+                .unwrap_or_else(|_| "{\"message\":\"event serialization failed\"}".to_string());
+            Ok(Event::default().event(event.kind).data(payload))
+        })
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 async fn api_refresh(
@@ -345,6 +393,86 @@ async fn api_explain_history(
     }))
 }
 
+async fn api_request_explain(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+    Json(payload): Json<ExplainRequest>,
+) -> Result<Json<ExplainStartResponse>, ApiError> {
+    ensure_authorized(&state, auth)?;
+    let Some(opencode) = state.opencode.clone() else {
+        return Err(ApiError::bad_request(
+            "Explain is unavailable because opencode is not ready",
+        ));
+    };
+
+    let target = {
+        let review = state.review.lock().await;
+        let file = review
+            .files
+            .get(payload.file_index)
+            .ok_or_else(|| ApiError::not_found("file index is out of range"))?;
+        match payload.hunk_index {
+            Some(hunk_index) => {
+                let hunk = file
+                    .hunks
+                    .get(hunk_index)
+                    .ok_or_else(|| ApiError::not_found("hunk index is out of range"))?;
+                why_target_for_hunk(file, hunk)
+            }
+            None => why_target_for_file(file),
+        }
+    };
+
+    let mut explain = state.explain.lock().await;
+    let session_id = explain
+        .selected_session_id
+        .clone()
+        .ok_or_else(|| ApiError::bad_request("choose an Explain context source first"))?;
+    let model = explain.selected_model.clone();
+    let model_label = model.clone().unwrap_or_else(|| "Auto".to_string());
+    let id = explain.next_history_id;
+    explain.next_history_id += 1;
+    let label = target.label();
+    explain.history.push(WebExplainHistoryItem {
+        id,
+        label: label.clone(),
+        model: model_label.clone(),
+        status: "Running".to_string(),
+    });
+    drop(explain);
+
+    emit_event(
+        &state,
+        "explain_started",
+        format!("Explain started for {label}."),
+        Some(id),
+    );
+    let state_for_task = state.clone();
+    let label_for_task = label.clone();
+    tokio::spawn(async move {
+        let result = opencode
+            .ask_why(&session_id, &target, model.as_deref())
+            .await;
+        let (status, message) = match result {
+            Ok(_) => ("Ready", format!("Loaded explanation for {label_for_task}.")),
+            Err(error) => ("Failed", format!("Explain failed: {error}")),
+        };
+        {
+            let mut explain = state_for_task.explain.lock().await;
+            if let Some(run) = explain.history.iter_mut().find(|run| run.id == id) {
+                run.status = status.to_string();
+            }
+        }
+        emit_event(&state_for_task, "explain_finished", message, Some(id));
+    });
+
+    Ok(Json(ExplainStartResponse {
+        id,
+        label,
+        status: "Running".to_string(),
+    }))
+}
+
 async fn api_accept_file(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
@@ -451,18 +579,42 @@ async fn api_push(
     Query(auth): Query<AuthQuery>,
 ) -> Result<Json<ActionResponse>, ApiError> {
     ensure_authorized(&state, auth)?;
-    let token = state.settings.lock().await.github.token.clone();
-    state
-        .git
-        .push_current_branch(token.as_deref())
-        .await
-        .map_err(ApiError::from)?;
-    let review = state.review.lock().await;
-    Ok(Json(action_response(
+    emit_event(
         &state,
-        &review,
-        "Pushed reviewed commit to GitHub.",
-    )))
+        "publish_started",
+        "Publishing reviewed commit...",
+        None,
+    );
+    let token = state.settings.lock().await.github.token.clone();
+    match state.git.push_current_branch(token.as_deref()).await {
+        Ok(()) => {
+            emit_event(
+                &state,
+                "publish_finished",
+                "Pushed reviewed commit to GitHub.",
+                None,
+            );
+            let review = state.review.lock().await;
+            Ok(Json(action_response(
+                &state,
+                &review,
+                "Pushed reviewed commit to GitHub.",
+            )))
+        }
+        Err(error) => {
+            let api_error = ApiError::from(error);
+            emit_event(&state, "publish_failed", api_error.message.clone(), None);
+            Err(api_error)
+        }
+    }
+}
+
+fn emit_event(state: &WebState, kind: &str, message: impl Into<String>, run_id: Option<u64>) {
+    let _ = state.events.send(WebEvent {
+        kind: kind.to_string(),
+        message: message.into(),
+        run_id,
+    });
 }
 
 fn ensure_authorized(state: &WebState, auth: AuthQuery) -> Result<(), ApiError> {
@@ -1016,6 +1168,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let explainSessions = { available: false, selected_session_id: null, sessions: [] };
     let explainModels = { available: false, selected_model: null, models: [] };
     let explainHistory = { runs: [] };
+    let eventSource = null;
 
     const iconFor = (file) => {
       if (file.is_binary) return '◈';
@@ -1096,6 +1249,27 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (!item.enabled) { setStatus(`${item.label} is unavailable right now.`); return; }
       document.getElementById('commandPalette').close();
       await item.run();
+    }
+
+    function connectEvents() {
+      if (eventSource) eventSource.close();
+      eventSource = new EventSource(`/api/events?token=${encodeURIComponent(token || '')}`);
+      eventSource.addEventListener('publish_started', (event) => handleServerEvent(event));
+      eventSource.addEventListener('publish_finished', (event) => handleServerEvent(event));
+      eventSource.addEventListener('publish_failed', (event) => handleServerEvent(event));
+      eventSource.addEventListener('explain_started', (event) => handleServerEvent(event));
+      eventSource.addEventListener('explain_finished', (event) => handleServerEvent(event, true));
+      eventSource.onerror = () => setStatus('Live updates disconnected. Refresh if actions stop updating.');
+    }
+
+    function handleServerEvent(event, refreshHistory = false) {
+      try {
+        const payload = JSON.parse(event.data);
+        setStatus(payload.message);
+        if (refreshHistory) openExplainHistory(false).catch(showError);
+      } catch (_) {
+        setStatus(event.data || 'Received live update.');
+      }
     }
 
     async function request(path, options = {}) {
@@ -1273,11 +1447,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
       setStatus(`Explain model set to ${explainModelLabel()}.`);
     }
 
-    async function openExplainHistory() {
+    async function openExplainHistory(showDialog = true) {
       explainHistory = await request('/api/explain/history');
       renderExplainHistory();
-      document.getElementById('historyDialog').showModal();
-      setStatus('Explain history opened.');
+      if (showDialog) {
+        document.getElementById('historyDialog').showModal();
+        setStatus('Explain history opened.');
+      }
     }
 
     function renderExplainHistory() {
@@ -1318,9 +1494,20 @@ const INDEX_HTML: &str = r#"<!doctype html>
       setStatus('Explain menu opened.');
     }
 
-    function requestExplainPreview() {
-      document.getElementById('explainAnswer').textContent = 'Explain execution will be wired up after context and model selection are available.';
-      setStatus('Explain request flow is not connected yet.');
+    async function requestExplainPreview() {
+      const file = currentFile();
+      if (!file) return;
+      const payload = {
+        file_index: selectedFile,
+        hunk_index: focus === 'hunks' && file.hunks.length ? selectedHunk : null,
+      };
+      const run = await request('/api/explain', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      document.getElementById('explainAnswer').textContent = `Started ${run.label}. Watch status and history for completion.`;
+      explainHistory = await request('/api/explain/history');
+      setStatus(`Explain started for ${run.label}.`);
     }
 
     function renderState(nextState) {
@@ -1589,6 +1776,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       else if (event.key === 's') openSettings().catch(showError);
     });
 
+    connectEvents();
     loadState().catch(showError);
   </script>
 </body>
@@ -1660,12 +1848,14 @@ mod tests {
                 "/tmp/better-review-web-test.json",
             )),
             settings: Mutex::new(AppSettings::default()),
+            events: broadcast::channel(1).0,
             explain: Mutex::new(WebExplainState {
                 sessions: Vec::new(),
                 selected_session_id: None,
                 models: Vec::new(),
                 selected_model: None,
                 history: Vec::new(),
+                next_history_id: 1,
             }),
             review: Mutex::new(WebReviewState {
                 files: Vec::new(),
@@ -1688,6 +1878,7 @@ mod tests {
                 model: "Auto".to_string(),
                 status: "Ready".to_string(),
             }],
+            next_history_id: 2,
         };
 
         let response = explain_sessions_response(&state, &explain);
