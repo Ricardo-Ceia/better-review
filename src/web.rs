@@ -61,6 +61,8 @@ pub async fn run() -> Result<()> {
 
     let router = Router::new()
         .route("/", get(index))
+        .route("/app.js", get(web_js))
+        .route("/index.css", get(web_css))
         .route("/api/state", get(api_state))
         .route("/api/events", get(api_events))
         .route("/api/refresh", post(api_refresh))
@@ -252,6 +254,14 @@ struct FileResponse {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn web_js() -> impl IntoResponse {
+    ([("content-type", "text/javascript; charset=utf-8")], WEB_JS)
+}
+
+async fn web_css() -> impl IntoResponse {
+    ([("content-type", "text/css; charset=utf-8")], WEB_CSS)
 }
 
 async fn api_state(
@@ -865,6 +875,8 @@ async fn shutdown_signal() {
 }
 
 const INDEX_HTML: &str = include_str!("../assets/web/index.html");
+const WEB_JS: &str = include_str!("../assets/web/app.js");
+const WEB_CSS: &str = include_str!("../assets/web/index.css");
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,7 +888,7 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"explainScope\""));
         assert!(INDEX_HTML.contains("id=\"modelDialog\""));
         assert!(INDEX_HTML.contains("id=\"historyDialog\""));
-        assert!(INDEX_HTML.contains("Open Explain menu"));
+        assert!(WEB_JS.contains("Open Explain menu"));
     }
 
     #[test]

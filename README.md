@@ -115,6 +115,8 @@ better-review web
 
 The web mode binds to `127.0.0.1`, opens a browser with a local session token, and supports refresh, file/hunk accept or reject actions, unreview, committing accepted changes, settings, and publishing the current branch.
 
+The web UI source lives in `web/` and uses lightweight Vite + TypeScript. Build the embedded assets with `npm --prefix web run build` after changing the web source.
+
 If you launch the app before changes exist, or if new changes arrive after the app starts, press `r` to refresh the latest worktree state.
 
 ## Review Model
