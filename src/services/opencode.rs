@@ -79,6 +79,14 @@ impl WhyTarget {
         }
     }
 
+    pub fn cache_key_for_model(&self, session_id: &str, model: Option<&str>) -> String {
+        let base = self.cache_key(session_id);
+        match model {
+            Some(model) => format!("{base}:model:{model}"),
+            None => format!("{base}:model:auto"),
+        }
+    }
+
     fn prompt(&self) -> String {
         let instruction = concat!(
             "You are explaining code that was produced in this exact opencode session context. ",
@@ -94,6 +102,16 @@ impl WhyTarget {
             Self::Hunk { path, header, diff } => format!(
                 "{instruction}\n\nScope: hunk\nPath: {path}\nHeader: {header}\n\nHunk diff:\n{diff}"
             ),
+        }
+    }
+}
+
+impl WhyRiskLevel {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
         }
     }
 }

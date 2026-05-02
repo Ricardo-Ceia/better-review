@@ -45,6 +45,23 @@ pub enum FileStatus {
     Modified,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ReviewCounts {
+    pub unreviewed: usize,
+    pub accepted: usize,
+    pub rejected: usize,
+}
+
+impl ReviewCounts {
+    pub fn bump(&mut self, status: &ReviewStatus) {
+        match status {
+            ReviewStatus::Unreviewed => self.unreviewed += 1,
+            ReviewStatus::Accepted => self.accepted += 1,
+            ReviewStatus::Rejected => self.rejected += 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct FileDiff {
     pub old_path: String,
@@ -53,6 +70,20 @@ pub struct FileDiff {
     pub is_binary: bool,
     pub hunks: Vec<Hunk>,
     pub review_status: ReviewStatus,
+}
+
+pub fn count_review_statuses(files: &[FileDiff]) -> ReviewCounts {
+    let mut counts = ReviewCounts::default();
+    for file in files {
+        if file.hunks.is_empty() {
+            counts.bump(&file.review_status);
+        } else {
+            for hunk in &file.hunks {
+                counts.bump(&hunk.review_status);
+            }
+        }
+    }
+    counts
 }
 
 impl FileDiff {
@@ -110,7 +141,10 @@ impl FileDiff {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileDiff, FileStatus, ReviewStatus};
+    use super::{
+        DiffLine, DiffLineKind, FileDiff, FileStatus, Hunk, ReviewCounts, ReviewStatus,
+        count_review_statuses,
+    };
 
     #[test]
     fn display_path_falls_back_to_old_path_for_deleted_file() {
@@ -147,6 +181,45 @@ mod tests {
             ..FileDiff::default()
         };
         assert_eq!(mode_changed.display_label(), "script.sh mode changed");
+    }
+
+    #[test]
+    fn count_review_statuses_aggregates_files_and_hunks() {
+        let files = vec![
+            FileDiff {
+                status: FileStatus::ModeChanged,
+                review_status: ReviewStatus::Accepted,
+                ..FileDiff::default()
+            },
+            FileDiff {
+                hunks: vec![
+                    Hunk {
+                        review_status: ReviewStatus::Unreviewed,
+                        lines: vec![DiffLine {
+                            kind: DiffLineKind::Add,
+                            content: "new".to_string(),
+                            old_line: None,
+                            new_line: Some(1),
+                        }],
+                        ..Hunk::default()
+                    },
+                    Hunk {
+                        review_status: ReviewStatus::Rejected,
+                        ..Hunk::default()
+                    },
+                ],
+                ..FileDiff::default()
+            },
+        ];
+
+        assert_eq!(
+            count_review_statuses(&files),
+            ReviewCounts {
+                unreviewed: 1,
+                accepted: 1,
+                rejected: 1,
+            }
+        );
     }
 
     #[test]

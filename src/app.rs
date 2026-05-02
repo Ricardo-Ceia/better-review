@@ -22,10 +22,14 @@ use ratatui_textarea::{TextArea, WrapMode};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::domain::diff::{DiffLineKind, FileDiff, FileStatus, Hunk, ReviewStatus};
+use crate::domain::diff::{
+    DiffLineKind, FileDiff, FileStatus, Hunk, ReviewCounts, ReviewStatus, count_review_statuses,
+};
 use crate::services::git::{GitService, PushFailure};
+#[cfg(test)]
+use crate::services::opencode::WhyRiskLevel;
 use crate::services::opencode::{
-    OpencodeService, OpencodeSession, WhyAnswer, WhyRiskLevel, WhyTarget, why_target_for_file,
+    OpencodeService, OpencodeSession, WhyAnswer, WhyTarget, why_target_for_file,
     why_target_for_hunk,
 };
 use crate::settings::{AppSettings, KeybindingsSettings, SettingsStore, ThemePreset};
@@ -316,19 +320,7 @@ impl App {
     }
 
     fn review_counts(&self) -> ReviewCounts {
-        let mut counts = ReviewCounts::default();
-
-        for file in &self.review.files {
-            if file.hunks.is_empty() {
-                counts.bump(&file.review_status);
-            } else {
-                for hunk in &file.hunks {
-                    counts.bump(&hunk.review_status);
-                }
-            }
-        }
-
-        counts
+        count_review_statuses(&self.review.files)
     }
 
     fn open_commit_prompt(&mut self) -> TextArea<'static> {
@@ -358,13 +350,6 @@ impl App {
             self.why_this.model.auto_session_model = model;
         }
     }
-}
-
-#[derive(Default)]
-struct ReviewCounts {
-    unreviewed: usize,
-    accepted: usize,
-    rejected: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,16 +443,6 @@ fn current_brand_icon(animation: &AnimatedTextState) -> &'static str {
         BRAND_ICON
     } else {
         BRAND_ICON_ALT
-    }
-}
-
-impl ReviewCounts {
-    fn bump(&mut self, status: &ReviewStatus) {
-        match status {
-            ReviewStatus::Unreviewed => self.unreviewed += 1,
-            ReviewStatus::Accepted => self.accepted += 1,
-            ReviewStatus::Rejected => self.rejected += 1,
-        }
     }
 }
 
@@ -1745,7 +1720,7 @@ async fn request_explain_with_target(
         return Ok(());
     };
 
-    let cache_key = why_cache_key(&target, &context_source_id, requested_model.as_deref());
+    let cache_key = target.cache_key_for_model(&context_source_id, requested_model.as_deref());
     if let Some(index) = find_reusable_explain_run_index(&app.why_this, &cache_key) {
         if let Some(run) = app.why_this.runs.get(index) {
             app.why_this.current_run_id = Some(run.id);
@@ -5155,14 +5130,6 @@ fn why_model_display_label(app: &App) -> String {
     }
 }
 
-fn why_cache_key(target: &WhyTarget, session_id: &str, model: Option<&str>) -> String {
-    let base = target.cache_key(session_id);
-    match model {
-        Some(model) => format!("{base}:model:{model}"),
-        None => format!("{base}:model:auto"),
-    }
-}
-
 fn loading_thinking_label(animation: &AnimatedTextState) -> String {
     let phase = (animation.frame / 24) % 4;
     let dots = ".".repeat(phase as usize);
@@ -5187,7 +5154,7 @@ fn render_why_answer_lines(answer: &WhyAnswer) -> Vec<Line<'static>> {
         &answer.change,
     ));
     lines.extend(render_why_section(
-        &format!("Risk ({}):", risk_level_label(answer.risk_level.clone())),
+        &format!("Risk ({}):", answer.risk_level.label()),
         Style::default()
             .fg(styles::danger())
             .add_modifier(Modifier::BOLD),
@@ -5203,14 +5170,6 @@ fn render_why_section(label: &str, label_style: Style, body: &str) -> Vec<Line<'
     }
     lines.push(Line::from(Span::raw("")));
     lines
-}
-
-fn risk_level_label(level: WhyRiskLevel) -> &'static str {
-    match level {
-        WhyRiskLevel::Low => "low",
-        WhyRiskLevel::Medium => "medium",
-        WhyRiskLevel::High => "high",
-    }
 }
 
 fn current_why_target(review: &ReviewUiState) -> Option<(String, WhyTarget)> {
@@ -6194,8 +6153,8 @@ mod tests {
     fn why_cache_key_is_model_aware() {
         let file = sample_file();
         let target = why_target_for_file(&file);
-        let auto_key = why_cache_key(&target, "ses_1", None);
-        let explicit_key = why_cache_key(&target, "ses_1", Some("openai/gpt-5"));
+        let auto_key = target.cache_key_for_model("ses_1", None);
+        let explicit_key = target.cache_key_for_model("ses_1", Some("openai/gpt-5"));
 
         assert_ne!(auto_key, explicit_key);
         assert!(auto_key.contains(":model:auto"));

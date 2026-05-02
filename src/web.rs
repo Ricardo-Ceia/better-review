@@ -16,7 +16,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::domain::diff::{FileDiff, Hunk, ReviewStatus};
+use crate::domain::diff::{FileDiff, Hunk, ReviewCounts, ReviewStatus, count_review_statuses};
 use crate::services::git::{GitService, PushFailure};
 use crate::services::opencode::{
     OpencodeService, OpencodeSession, WhyAnswer, why_target_for_file, why_target_for_hunk,
@@ -149,7 +149,7 @@ struct AuthQuery {
 struct ReviewStateResponse {
     repo_path: String,
     version: u64,
-    counts: ReviewCountsResponse,
+    counts: ReviewCounts,
     files: Vec<FileResponse>,
 }
 
@@ -249,13 +249,6 @@ struct SettingsResponse {
 struct ActionResponse {
     message: String,
     state: ReviewStateResponse,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-struct ReviewCountsResponse {
-    unreviewed: usize,
-    accepted: usize,
-    rejected: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -851,7 +844,7 @@ fn review_state_response(
     repo_path: &std::path::Path,
     review: &WebReviewState,
 ) -> ReviewStateResponse {
-    let counts = review_counts(&review.files);
+    let counts = count_review_statuses(&review.files);
     let files = review
         .files
         .clone()
@@ -866,35 +859,13 @@ fn review_state_response(
     }
 }
 
-fn review_counts(files: &[FileDiff]) -> ReviewCountsResponse {
-    let mut counts = ReviewCountsResponse::default();
-    for file in files {
-        if file.hunks.is_empty() {
-            bump_count(&mut counts, &file.review_status);
-        } else {
-            for hunk in &file.hunks {
-                bump_count(&mut counts, &hunk.review_status);
-            }
-        }
-    }
-    counts
-}
-
-fn bump_count(counts: &mut ReviewCountsResponse, status: &ReviewStatus) {
-    match status {
-        ReviewStatus::Unreviewed => counts.unreviewed += 1,
-        ReviewStatus::Accepted => counts.accepted += 1,
-        ReviewStatus::Rejected => counts.rejected += 1,
-    }
-}
-
 impl From<WhyAnswer> for WebExplainAnswer {
     fn from(answer: WhyAnswer) -> Self {
         Self {
             summary: answer.summary,
             purpose: answer.purpose,
             change: answer.change,
-            risk_level: format!("{:?}", answer.risk_level),
+            risk_level: answer.risk_level.label().to_string(),
             risk_reason: answer.risk_reason,
         }
     }
@@ -1046,8 +1017,8 @@ mod tests {
         ];
 
         assert_eq!(
-            review_counts(&files),
-            ReviewCountsResponse {
+            count_review_statuses(&files),
+            ReviewCounts {
                 unreviewed: 1,
                 accepted: 1,
                 rejected: 1,
@@ -1137,7 +1108,7 @@ mod tests {
                     summary: "summary".to_string(),
                     purpose: "purpose".to_string(),
                     change: "change".to_string(),
-                    risk_level: "Low".to_string(),
+                    risk_level: "low".to_string(),
                     risk_reason: "low risk".to_string(),
                 }),
                 error: None,
@@ -1171,7 +1142,7 @@ mod tests {
         });
 
         assert_eq!(answer.summary, "Summarizes the change");
-        assert_eq!(answer.risk_level, "High");
+        assert_eq!(answer.risk_level, "high");
         assert_eq!(answer.risk_reason, "Touches publish flow");
     }
 
