@@ -40,6 +40,9 @@ pub async fn run() -> Result<()> {
         explain: Mutex::new(WebExplainState {
             sessions,
             selected_session_id,
+            models: Vec::new(),
+            selected_model: None,
+            history: Vec::new(),
         }),
         review: Mutex::new(WebReviewState {
             files,
@@ -55,6 +58,9 @@ pub async fn run() -> Result<()> {
         .route("/api/settings/github-token", post(api_save_github_token))
         .route("/api/explain/sessions", get(api_explain_sessions))
         .route("/api/explain/session", post(api_select_explain_session))
+        .route("/api/explain/models", get(api_explain_models))
+        .route("/api/explain/model", post(api_select_explain_model))
+        .route("/api/explain/history", get(api_explain_history))
         .route("/api/commit", post(api_commit))
         .route("/api/push", post(api_push))
         .route("/api/files/:file_index/accept", post(api_accept_file))
@@ -109,6 +115,9 @@ struct WebReviewState {
 struct WebExplainState {
     sessions: Vec<WebSessionResponse>,
     selected_session_id: Option<String>,
+    models: Vec<String>,
+    selected_model: Option<String>,
+    history: Vec<WebExplainHistoryItem>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +147,19 @@ struct ExplainSessionRequest {
     session_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ExplainModelRequest {
+    model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct WebExplainHistoryItem {
+    id: u64,
+    label: String,
+    model: String,
+    status: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct WebSessionResponse {
     id: String,
@@ -151,6 +173,18 @@ struct ExplainSessionsResponse {
     available: bool,
     selected_session_id: Option<String>,
     sessions: Vec<WebSessionResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExplainModelsResponse {
+    available: bool,
+    selected_model: Option<String>,
+    models: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExplainHistoryResponse {
+    runs: Vec<WebExplainHistoryItem>,
 }
 
 #[derive(Debug, Serialize)]
@@ -268,6 +302,47 @@ async fn api_select_explain_session(
         None => explain.selected_session_id = None,
     }
     Ok(Json(explain_sessions_response(&state, &explain)))
+}
+
+async fn api_explain_models(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+) -> Result<Json<ExplainModelsResponse>, ApiError> {
+    ensure_authorized(&state, auth)?;
+    refresh_explain_models(&state).await;
+    let explain = state.explain.lock().await;
+    Ok(Json(explain_models_response(&state, &explain)))
+}
+
+async fn api_select_explain_model(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+    Json(payload): Json<ExplainModelRequest>,
+) -> Result<Json<ExplainModelsResponse>, ApiError> {
+    ensure_authorized(&state, auth)?;
+    refresh_explain_models(&state).await;
+    let mut explain = state.explain.lock().await;
+    match payload.model {
+        Some(model) => {
+            if !explain.models.iter().any(|candidate| candidate == &model) {
+                return Err(ApiError::not_found("Explain model was not found"));
+            }
+            explain.selected_model = Some(model);
+        }
+        None => explain.selected_model = None,
+    }
+    Ok(Json(explain_models_response(&state, &explain)))
+}
+
+async fn api_explain_history(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+) -> Result<Json<ExplainHistoryResponse>, ApiError> {
+    ensure_authorized(&state, auth)?;
+    let explain = state.explain.lock().await;
+    Ok(Json(ExplainHistoryResponse {
+        runs: explain.history.clone(),
+    }))
 }
 
 async fn api_accept_file(
@@ -419,6 +494,22 @@ async fn refresh_explain_sessions(state: &WebState) {
     }
 }
 
+async fn refresh_explain_models(state: &WebState) {
+    let Some(opencode) = &state.opencode else {
+        return;
+    };
+    let Ok(models) = opencode.list_models().await else {
+        return;
+    };
+    let mut explain = state.explain.lock().await;
+    explain.models = models;
+    if let Some(selected) = &explain.selected_model
+        && !explain.models.iter().any(|model| model == selected)
+    {
+        explain.selected_model = None;
+    }
+}
+
 fn load_web_sessions(opencode: Option<&OpencodeService>) -> Vec<WebSessionResponse> {
     opencode
         .and_then(|service| service.list_repo_sessions().ok())
@@ -436,6 +527,14 @@ fn explain_sessions_response(
         available: state.opencode.is_some(),
         selected_session_id: explain.selected_session_id.clone(),
         sessions: explain.sessions.clone(),
+    }
+}
+
+fn explain_models_response(state: &WebState, explain: &WebExplainState) -> ExplainModelsResponse {
+    ExplainModelsResponse {
+        available: state.opencode.is_some(),
+        selected_model: explain.selected_model.clone(),
+        models: explain.models.clone(),
     }
 }
 
@@ -716,6 +815,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .session-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; max-height: 360px; overflow: auto; }
     .session-item { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid #263244; border-radius: 12px; background: #0f172a; }
     .session-item.selected { border-color: var(--accent); background: #172554; }
+    .history-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; max-height: 360px; overflow: auto; }
+    .history-item { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid #263244; border-radius: 12px; background: #0f172a; }
     @media (max-width: 920px) { .workspace { grid-template-columns: 1fr; } .files { max-height: 40vh; } .topbar { grid-template-columns: 1fr; height: auto; gap: 6px; padding: 10px 14px; } .brand, .repo, .counts { grid-column: auto; justify-self: start; max-width: 100%; } }
   </style>
 </head>
@@ -824,11 +925,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
         <p id="explainContext" class="muted" style="margin: 4px 0 0;">Loading context source…</p>
       </div>
       <div>
+        <div class="muted">Model</div>
+        <p id="explainModel" class="muted" style="margin: 4px 0 0;">Auto</p>
+      </div>
+      <div>
         <div class="muted">Answer</div>
         <p id="explainAnswer" class="muted" style="margin: 4px 0 0;">No explanation has been requested yet.</p>
       </div>
       <div class="file-actions" style="justify-content: flex-end;">
         <button id="chooseExplainContext" value="default">Choose context</button>
+        <button id="chooseExplainModel" value="default">Choose model</button>
+        <button id="openExplainHistory" value="default">History</button>
         <button value="cancel">Close</button>
         <button id="requestExplain" class="primary" value="default">Explain</button>
       </div>
@@ -840,6 +947,28 @@ const INDEX_HTML: &str = r#"<!doctype html>
       <h2 style="margin: 0;">Choose Explain context</h2>
       <p id="sessionStatus" class="muted">Loading sessions…</p>
       <ul id="sessionList" class="session-list"></ul>
+      <div class="file-actions" style="justify-content: flex-end;">
+        <button value="cancel">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="modelDialog">
+    <form method="dialog" style="display: grid; gap: 14px;">
+      <h2 style="margin: 0;">Choose Explain model</h2>
+      <p id="modelStatus" class="muted">Loading models…</p>
+      <ul id="modelList" class="session-list"></ul>
+      <div class="file-actions" style="justify-content: flex-end;">
+        <button value="cancel">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="historyDialog">
+    <form method="dialog" style="display: grid; gap: 14px;">
+      <h2 style="margin: 0;">Explain history</h2>
+      <p id="historyStatus" class="muted">No explanations in this session yet.</p>
+      <ul id="historyList" class="history-list"></ul>
       <div class="file-actions" style="justify-content: flex-end;">
         <button value="cancel">Close</button>
       </div>
@@ -885,6 +1014,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let paletteCursor = 0;
     let settings = { has_github_token: false };
     let explainSessions = { available: false, selected_session_id: null, sessions: [] };
+    let explainModels = { available: false, selected_model: null, models: [] };
+    let explainHistory = { runs: [] };
 
     const iconFor = (file) => {
       if (file.is_binary) return '◈';
@@ -917,6 +1048,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         { label: 'Move file to unreviewed', detail: 'Unstage the current file and mark it pending', shortcut: 'u', enabled: inReview, run: unreviewCurrent },
         { label: 'Open Explain menu', detail: 'Preview the current file or hunk explanation target', shortcut: 'e', enabled: inReview, run: openExplainMenu },
         { label: 'Choose Explain context', detail: 'Select the opencode session used for Explain', shortcut: 'o', enabled: true, run: openSessionPicker },
+        { label: 'Choose Explain model', detail: 'Select the model used for Explain', shortcut: 'm', enabled: true, run: openModelPicker },
+        { label: 'Open Explain history', detail: 'Show explanations from this browser session', shortcut: 'h', enabled: true, run: openExplainHistory },
         { label: 'Commit accepted changes', detail: 'Write a commit message for accepted changes', shortcut: 'c', enabled: reviewAvailable, run: () => document.getElementById('commitDialog').showModal() },
         { label: 'Publish current branch', detail: 'Push the reviewed commit from the current branch', shortcut: 'p', enabled: true, run: () => document.getElementById('publishDialog').showModal() },
         { label: 'Open settings', detail: 'Configure GitHub token for HTTPS publishing', shortcut: 's', enabled: true, run: openSettings },
@@ -982,8 +1115,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     async function loadState(message = 'Review state loaded.') {
       settings = await request('/api/settings');
       explainSessions = await request('/api/explain/sessions');
+      explainModels = await request('/api/explain/models');
+      explainHistory = await request('/api/explain/history');
       renderSettingsStatus();
       renderExplainContext();
+      renderExplainModel();
       renderState(await request('/api/state'));
       setStatus(message);
     }
@@ -1041,6 +1177,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (context) context.textContent = explainContextLabel();
     }
 
+    function explainModelLabel() {
+      if (!explainModels.available) return 'Explain is unavailable because opencode is not ready.';
+      return explainModels.selected_model || 'Auto';
+    }
+
+    function renderExplainModel() {
+      const model = document.getElementById('explainModel');
+      if (model) model.textContent = explainModelLabel();
+    }
+
     async function openSessionPicker() {
       explainSessions = await request('/api/explain/sessions');
       renderExplainContext();
@@ -1085,6 +1231,75 @@ const INDEX_HTML: &str = r#"<!doctype html>
       setStatus(`Explain will use context source ${explainContextLabel()}.`);
     }
 
+    async function openModelPicker() {
+      explainModels = await request('/api/explain/models');
+      renderExplainModel();
+      renderModelList();
+      document.getElementById('modelDialog').showModal();
+      setStatus('Choose an Explain model.');
+    }
+
+    function renderModelList() {
+      const status = document.getElementById('modelStatus');
+      const list = document.getElementById('modelList');
+      list.innerHTML = '';
+      if (!explainModels.available) {
+        status.textContent = 'Explain is unavailable because opencode is not ready.';
+        return;
+      }
+      status.textContent = 'Choose Auto or a specific opencode model.';
+      renderModelRow(list, null, 'Auto');
+      explainModels.models.forEach((model) => renderModelRow(list, model, model));
+    }
+
+    function renderModelRow(list, model, label) {
+      const row = document.createElement('li');
+      row.className = `session-item ${model === explainModels.selected_model ? 'selected' : ''}`;
+      row.innerHTML = '<strong></strong><span class="muted"></span>';
+      row.querySelector('strong').textContent = label;
+      row.querySelector('.muted').textContent = model ? 'Explicit model' : 'Use saved/session default when available';
+      row.addEventListener('click', () => selectExplainModel(model).catch(showError));
+      list.appendChild(row);
+    }
+
+    async function selectExplainModel(model) {
+      explainModels = await request('/api/explain/model', {
+        method: 'POST',
+        body: JSON.stringify({ model }),
+      });
+      renderExplainModel();
+      renderModelList();
+      document.getElementById('modelDialog').close();
+      setStatus(`Explain model set to ${explainModelLabel()}.`);
+    }
+
+    async function openExplainHistory() {
+      explainHistory = await request('/api/explain/history');
+      renderExplainHistory();
+      document.getElementById('historyDialog').showModal();
+      setStatus('Explain history opened.');
+    }
+
+    function renderExplainHistory() {
+      const status = document.getElementById('historyStatus');
+      const list = document.getElementById('historyList');
+      list.innerHTML = '';
+      if (!explainHistory.runs.length) {
+        status.textContent = 'No explanations in this session yet.';
+        return;
+      }
+      status.textContent = 'Explain runs from this browser session.';
+      explainHistory.runs.forEach((run) => {
+        const row = document.createElement('li');
+        row.className = 'history-item';
+        row.innerHTML = '<strong></strong><span class="muted"></span><span class="muted"></span>';
+        row.querySelector('strong').textContent = run.label;
+        row.querySelectorAll('.muted')[0].textContent = `${run.status} · ${run.model}`;
+        row.querySelectorAll('.muted')[1].textContent = `run ${run.id}`;
+        list.appendChild(row);
+      });
+    }
+
     function explainTargetLabel() {
       const file = currentFile();
       if (!file) return 'No selection';
@@ -1094,8 +1309,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     async function openExplainMenu() {
       explainSessions = await request('/api/explain/sessions');
+      explainModels = await request('/api/explain/models');
       document.getElementById('explainScope').textContent = explainTargetLabel();
       renderExplainContext();
+      renderExplainModel();
       document.getElementById('explainAnswer').textContent = 'No explanation has been requested yet.';
       document.getElementById('explainDialog').showModal();
       setStatus('Explain menu opened.');
@@ -1297,6 +1514,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     document.getElementById('unreviewCurrent').addEventListener('click', () => unreviewCurrent().catch(showError));
     document.getElementById('openExplain').addEventListener('click', () => openExplainMenu().catch(showError));
     document.getElementById('chooseExplainContext').addEventListener('click', (event) => { event.preventDefault(); openSessionPicker().catch(showError); });
+    document.getElementById('chooseExplainModel').addEventListener('click', (event) => { event.preventDefault(); openModelPicker().catch(showError); });
+    document.getElementById('openExplainHistory').addEventListener('click', (event) => { event.preventDefault(); openExplainHistory().catch(showError); });
     document.getElementById('requestExplain').addEventListener('click', (event) => { event.preventDefault(); requestExplainPreview(); });
     document.getElementById('openCommit').addEventListener('click', () => document.getElementById('commitDialog').showModal());
     document.getElementById('publishCurrent').addEventListener('click', () => document.getElementById('publishDialog').showModal());
@@ -1338,6 +1557,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         else if (event.key === 'p') { document.getElementById('publishDialog').showModal(); event.preventDefault(); }
         else if (event.key === 's') { openSettings().catch(showError); event.preventDefault(); }
         else if (event.key === 'o') { openSessionPicker().catch(showError); event.preventDefault(); }
+        else if (event.key === 'm') { openModelPicker().catch(showError); event.preventDefault(); }
+        else if (event.key === 'h') { openExplainHistory().catch(showError); event.preventDefault(); }
         return;
       }
       if (event.key === 'j' || event.key === 'ArrowDown') {
@@ -1360,6 +1581,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       else if (event.key === 'u') unreviewCurrent().catch(showError);
       else if (event.key === 'e') openExplainMenu().catch(showError);
       else if (event.key === 'o') openSessionPicker().catch(showError);
+      else if (event.key === 'm') openModelPicker().catch(showError);
+      else if (event.key === 'h') openExplainHistory().catch(showError);
       else if (event.key === 'r') mutate('/api/refresh', 'Refreshed review queue.').catch(showError);
       else if (event.key === 'c') document.getElementById('commitDialog').showModal();
       else if (event.key === 'p') document.getElementById('publishDialog').showModal();
@@ -1380,6 +1603,8 @@ mod tests {
     fn web_index_includes_explain_menu_shell() {
         assert!(INDEX_HTML.contains("id=\"explainDialog\""));
         assert!(INDEX_HTML.contains("id=\"explainScope\""));
+        assert!(INDEX_HTML.contains("id=\"modelDialog\""));
+        assert!(INDEX_HTML.contains("id=\"historyDialog\""));
         assert!(INDEX_HTML.contains("Open Explain menu"));
     }
 
@@ -1438,6 +1663,9 @@ mod tests {
             explain: Mutex::new(WebExplainState {
                 sessions: Vec::new(),
                 selected_session_id: None,
+                models: Vec::new(),
+                selected_model: None,
+                history: Vec::new(),
             }),
             review: Mutex::new(WebReviewState {
                 files: Vec::new(),
@@ -1452,12 +1680,28 @@ mod tests {
                 time_updated: 42,
             }],
             selected_session_id: Some("ses_1".to_string()),
+            models: vec!["openai/gpt-5".to_string()],
+            selected_model: Some("openai/gpt-5".to_string()),
+            history: vec![WebExplainHistoryItem {
+                id: 1,
+                label: "file src/lib.rs".to_string(),
+                model: "Auto".to_string(),
+                status: "Ready".to_string(),
+            }],
         };
 
         let response = explain_sessions_response(&state, &explain);
         assert!(!response.available);
         assert_eq!(response.selected_session_id, Some("ses_1".to_string()));
         assert_eq!(response.sessions[0].title, "Session one");
+
+        let model_response = explain_models_response(&state, &explain);
+        assert!(!model_response.available);
+        assert_eq!(
+            model_response.selected_model,
+            Some("openai/gpt-5".to_string())
+        );
+        assert_eq!(model_response.models, vec!["openai/gpt-5".to_string()]);
     }
 
     #[test]
