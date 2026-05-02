@@ -149,7 +149,9 @@ const token = new URLSearchParams(location.search).get('token');
     }
 
     async function mutate(path, message) {
-      const result = await request(path, { method: 'POST' });
+      const separator = path.includes('?') ? '&' : '?';
+      const versionedPath = `${path}${separator}state_version=${encodeURIComponent(state?.version ?? '')}`;
+      const result = await request(versionedPath, { method: 'POST' });
       renderState(result.state);
       setStatus(result.message || message);
     }
@@ -634,7 +636,7 @@ const token = new URLSearchParams(location.search).get('token');
       event.preventDefault();
       try {
         const message = document.getElementById('commitMessage').value;
-        const result = await request('/api/commit', { method: 'POST', body: JSON.stringify({ message }) });
+        const result = await request('/api/commit', { method: 'POST', body: JSON.stringify({ message, state_version: state?.version }) });
         document.getElementById('commitDialog').close();
         document.getElementById('commitMessage').value = '';
         renderState(result.state);

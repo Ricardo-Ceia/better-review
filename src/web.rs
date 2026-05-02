@@ -45,6 +45,7 @@ pub async fn run() -> Result<()> {
         settings_store,
         settings: Mutex::new(settings),
         events,
+        operation: Mutex::new(()),
         explain: Mutex::new(WebExplainState {
             sessions,
             selected_session_id,
@@ -56,6 +57,7 @@ pub async fn run() -> Result<()> {
         review: Mutex::new(WebReviewState {
             files,
             had_staged_changes_on_open,
+            version: 1,
         }),
     });
 
@@ -117,6 +119,7 @@ struct WebState {
     settings_store: SettingsStore,
     settings: Mutex<AppSettings>,
     events: broadcast::Sender<WebEvent>,
+    operation: Mutex<()>,
     explain: Mutex<WebExplainState>,
     review: Mutex<WebReviewState>,
 }
@@ -124,6 +127,7 @@ struct WebState {
 struct WebReviewState {
     files: Vec<FileDiff>,
     had_staged_changes_on_open: bool,
+    version: u64,
 }
 
 struct WebExplainState {
@@ -138,11 +142,13 @@ struct WebExplainState {
 #[derive(Debug, Deserialize)]
 struct AuthQuery {
     token: Option<String>,
+    state_version: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
 struct ReviewStateResponse {
     repo_path: String,
+    version: u64,
     counts: ReviewCountsResponse,
     files: Vec<FileResponse>,
 }
@@ -150,6 +156,7 @@ struct ReviewStateResponse {
 #[derive(Debug, Deserialize)]
 struct CommitRequest {
     message: String,
+    state_version: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,19 +286,16 @@ async fn api_state(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
 ) -> Result<Json<ReviewStateResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     let review = state.review.lock().await;
-    Ok(Json(review_state_response(
-        &state.repo_path,
-        review.files.clone(),
-    )))
+    Ok(Json(review_state_response(&state.repo_path, &review)))
 }
 
 async fn api_events(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     let stream = BroadcastStream::new(state.events.subscribe()).filter_map(|event| {
         event.ok().map(|event| {
             let payload = serde_json::to_string(&event)
@@ -306,10 +310,12 @@ async fn api_refresh(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
+    let _operation = state.operation.lock().await;
     let (_, files) = state.git.collect_diff().await?;
     let mut review = state.review.lock().await;
     review.files = files;
+    bump_review_version(&mut review);
     Ok(Json(action_response(
         &state,
         &review,
@@ -321,7 +327,7 @@ async fn api_settings(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
 ) -> Result<Json<SettingsResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     let settings = state.settings.lock().await;
     Ok(Json(settings_response(&settings)))
 }
@@ -331,7 +337,7 @@ async fn api_save_github_token(
     Query(auth): Query<AuthQuery>,
     Json(payload): Json<GitHubTokenRequest>,
 ) -> Result<Json<SettingsResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     let mut settings = state.settings.lock().await;
     let token = payload.token.trim().to_string();
     settings.github.token = if token.is_empty() { None } else { Some(token) };
@@ -343,7 +349,7 @@ async fn api_explain_sessions(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
 ) -> Result<Json<ExplainSessionsResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     refresh_explain_sessions(&state).await;
     let explain = state.explain.lock().await;
     Ok(Json(explain_sessions_response(&state, &explain)))
@@ -354,7 +360,7 @@ async fn api_select_explain_session(
     Query(auth): Query<AuthQuery>,
     Json(payload): Json<ExplainSessionRequest>,
 ) -> Result<Json<ExplainSessionsResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     refresh_explain_sessions(&state).await;
     let mut explain = state.explain.lock().await;
     match payload.session_id {
@@ -377,7 +383,7 @@ async fn api_explain_models(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
 ) -> Result<Json<ExplainModelsResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     refresh_explain_models(&state).await;
     let explain = state.explain.lock().await;
     Ok(Json(explain_models_response(&state, &explain)))
@@ -388,7 +394,7 @@ async fn api_select_explain_model(
     Query(auth): Query<AuthQuery>,
     Json(payload): Json<ExplainModelRequest>,
 ) -> Result<Json<ExplainModelsResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     refresh_explain_models(&state).await;
     let mut explain = state.explain.lock().await;
     match payload.model {
@@ -407,7 +413,7 @@ async fn api_explain_history(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
 ) -> Result<Json<ExplainHistoryResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     let explain = state.explain.lock().await;
     Ok(Json(ExplainHistoryResponse {
         runs: explain.history.clone(),
@@ -419,7 +425,7 @@ async fn api_request_explain(
     Query(auth): Query<AuthQuery>,
     Json(payload): Json<ExplainRequest>,
 ) -> Result<Json<ExplainStartResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     let Some(opencode) = state.opencode.clone() else {
         return Err(ApiError::bad_request(
             "Explain is unavailable because opencode is not ready",
@@ -516,10 +522,13 @@ async fn api_accept_file(
     Query(auth): Query<AuthQuery>,
     AxumPath(file_index): AxumPath<usize>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
+    let _operation = state.operation.lock().await;
+    let mut file = clone_review_file_for_mutation(&state, file_index, auth.state_version).await?;
+    state.git.accept_file(&mut file).await?;
     let mut review = state.review.lock().await;
-    let file = review_file_mut(&mut review, file_index)?;
-    state.git.accept_file(file).await?;
+    ensure_fresh_review_version(&review, auth.state_version)?;
+    replace_review_file(&mut review, file_index, file)?;
     Ok(Json(action_response(
         &state,
         &review,
@@ -532,10 +541,13 @@ async fn api_reject_file(
     Query(auth): Query<AuthQuery>,
     AxumPath(file_index): AxumPath<usize>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
+    let _operation = state.operation.lock().await;
+    let mut file = clone_review_file_for_mutation(&state, file_index, auth.state_version).await?;
+    state.git.reject_file_in_place(&mut file).await?;
     let mut review = state.review.lock().await;
-    let file = review_file_mut(&mut review, file_index)?;
-    state.git.reject_file_in_place(file).await?;
+    ensure_fresh_review_version(&review, auth.state_version)?;
+    replace_review_file(&mut review, file_index, file)?;
     Ok(Json(action_response(
         &state,
         &review,
@@ -548,10 +560,13 @@ async fn api_unreview_file(
     Query(auth): Query<AuthQuery>,
     AxumPath(file_index): AxumPath<usize>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
+    let _operation = state.operation.lock().await;
+    let mut file = clone_review_file_for_mutation(&state, file_index, auth.state_version).await?;
+    state.git.unstage_file_in_place(&mut file).await?;
     let mut review = state.review.lock().await;
-    let file = review_file_mut(&mut review, file_index)?;
-    state.git.unstage_file_in_place(file).await?;
+    ensure_fresh_review_version(&review, auth.state_version)?;
+    replace_review_file(&mut review, file_index, file)?;
     Ok(Json(action_response(
         &state,
         &review,
@@ -564,8 +579,16 @@ async fn api_accept_hunk(
     Query(auth): Query<AuthQuery>,
     AxumPath((file_index, hunk_index)): AxumPath<(usize, usize)>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
-    update_hunk_review_status(&state, file_index, hunk_index, ReviewStatus::Accepted).await?;
+    ensure_authorized(&state, &auth)?;
+    let _operation = state.operation.lock().await;
+    update_hunk_review_status(
+        &state,
+        file_index,
+        hunk_index,
+        ReviewStatus::Accepted,
+        auth.state_version,
+    )
+    .await?;
     let review = state.review.lock().await;
     Ok(Json(action_response(&state, &review, "Accepted hunk.")))
 }
@@ -575,8 +598,16 @@ async fn api_reject_hunk(
     Query(auth): Query<AuthQuery>,
     AxumPath((file_index, hunk_index)): AxumPath<(usize, usize)>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
-    update_hunk_review_status(&state, file_index, hunk_index, ReviewStatus::Rejected).await?;
+    ensure_authorized(&state, &auth)?;
+    let _operation = state.operation.lock().await;
+    update_hunk_review_status(
+        &state,
+        file_index,
+        hunk_index,
+        ReviewStatus::Rejected,
+        auth.state_version,
+    )
+    .await?;
     let review = state.review.lock().await;
     Ok(Json(action_response(&state, &review, "Rejected hunk.")))
 }
@@ -586,25 +617,32 @@ async fn api_commit(
     Query(auth): Query<AuthQuery>,
     Json(payload): Json<CommitRequest>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     let message = payload.message.trim();
     if message.is_empty() {
         return Err(ApiError::bad_request("write a commit message first"));
     }
+    let _operation = state.operation.lock().await;
+    {
+        let review = state.review.lock().await;
+        ensure_fresh_review_version(&review, payload.state_version)?;
+        if review.had_staged_changes_on_open {
+            return Err(ApiError::conflict(
+                "cannot commit because better-review opened with unrelated staged changes",
+            ));
+        }
+    }
+
     if !state.git.has_staged_changes().await? {
         return Err(ApiError::bad_request("no accepted changes are staged yet"));
     }
 
-    let mut review = state.review.lock().await;
-    if review.had_staged_changes_on_open {
-        return Err(ApiError::conflict(
-            "cannot commit because better-review opened with unrelated staged changes",
-        ));
-    }
-
     state.git.commit_staged(message).await?;
     let (_, files) = state.git.collect_diff().await?;
+    let mut review = state.review.lock().await;
+    ensure_fresh_review_version(&review, payload.state_version)?;
     review.files = files;
+    bump_review_version(&mut review);
     Ok(Json(action_response(
         &state,
         &review,
@@ -616,7 +654,7 @@ async fn api_push(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, auth)?;
+    ensure_authorized(&state, &auth)?;
     emit_event(
         &state,
         "publish_started",
@@ -655,13 +693,28 @@ fn emit_event(state: &WebState, kind: &str, message: impl Into<String>, run_id: 
     });
 }
 
-fn ensure_authorized(state: &WebState, auth: AuthQuery) -> Result<(), ApiError> {
+fn ensure_authorized(state: &WebState, auth: &AuthQuery) -> Result<(), ApiError> {
     if auth.token.as_deref() == Some(state.token.as_str()) {
         Ok(())
     } else {
         Err(ApiError::unauthorized(
             "missing or invalid local session token",
         ))
+    }
+}
+
+fn ensure_fresh_review_version(
+    review: &WebReviewState,
+    expected_version: Option<u64>,
+) -> Result<(), ApiError> {
+    match expected_version {
+        Some(version) if version == review.version => Ok(()),
+        Some(_) => Err(ApiError::conflict(
+            "review state changed; refresh and try the action again",
+        )),
+        None => Err(ApiError::bad_request(
+            "missing review state version; refresh and try again",
+        )),
     }
 }
 
@@ -737,8 +790,22 @@ fn settings_response(settings: &AppSettings) -> SettingsResponse {
 fn action_response(state: &WebState, review: &WebReviewState, message: &str) -> ActionResponse {
     ActionResponse {
         message: message.to_string(),
-        state: review_state_response(&state.repo_path, review.files.clone()),
+        state: review_state_response(&state.repo_path, review),
     }
+}
+
+async fn clone_review_file_for_mutation(
+    state: &WebState,
+    file_index: usize,
+    expected_version: Option<u64>,
+) -> Result<FileDiff, ApiError> {
+    let review = state.review.lock().await;
+    ensure_fresh_review_version(&review, expected_version)?;
+    review
+        .files
+        .get(file_index)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found("file index is out of range"))
 }
 
 async fn update_hunk_review_status(
@@ -746,38 +813,54 @@ async fn update_hunk_review_status(
     file_index: usize,
     hunk_index: usize,
     status: ReviewStatus,
+    expected_version: Option<u64>,
 ) -> Result<(), ApiError> {
-    let mut review = state.review.lock().await;
-    let Some(file) = review.files.get(file_index) else {
-        return Err(ApiError::not_found("file index is out of range"));
-    };
-    if file.hunks.get(hunk_index).is_none() {
+    let mut updated_file =
+        clone_review_file_for_mutation(state, file_index, expected_version).await?;
+    if updated_file.hunks.get(hunk_index).is_none() {
         return Err(ApiError::not_found("hunk index is out of range"));
     }
 
-    let mut updated_file = file.clone();
     updated_file.hunks[hunk_index].review_status = status;
     updated_file.sync_review_status();
     state.git.sync_file_hunks_to_index(&updated_file).await?;
-    review.files[file_index] = updated_file;
+    let mut review = state.review.lock().await;
+    ensure_fresh_review_version(&review, expected_version)?;
+    replace_review_file(&mut review, file_index, updated_file)?;
     Ok(())
 }
 
-fn review_file_mut(
+fn replace_review_file(
     review: &mut WebReviewState,
     file_index: usize,
-) -> Result<&mut FileDiff, ApiError> {
-    review
-        .files
-        .get_mut(file_index)
-        .ok_or_else(|| ApiError::not_found("file index is out of range"))
+    file: FileDiff,
+) -> Result<(), ApiError> {
+    let Some(slot) = review.files.get_mut(file_index) else {
+        return Err(ApiError::not_found("file index is out of range"));
+    };
+    *slot = file;
+    bump_review_version(review);
+    Ok(())
 }
 
-fn review_state_response(repo_path: &std::path::Path, files: Vec<FileDiff>) -> ReviewStateResponse {
-    let counts = review_counts(&files);
-    let files = files.into_iter().map(FileResponse::from).collect();
+fn bump_review_version(review: &mut WebReviewState) {
+    review.version = review.version.saturating_add(1);
+}
+
+fn review_state_response(
+    repo_path: &std::path::Path,
+    review: &WebReviewState,
+) -> ReviewStateResponse {
+    let counts = review_counts(&review.files);
+    let files = review
+        .files
+        .clone()
+        .into_iter()
+        .map(FileResponse::from)
+        .collect();
     ReviewStateResponse {
         repo_path: repo_path.display().to_string(),
+        version: review.version,
         counts,
         files,
     }
@@ -973,6 +1056,42 @@ mod tests {
     }
 
     #[test]
+    fn review_state_response_includes_version() {
+        let review = WebReviewState {
+            files: Vec::new(),
+            had_staged_changes_on_open: false,
+            version: 7,
+        };
+
+        let response = review_state_response(std::path::Path::new("/repo"), &review);
+
+        assert_eq!(response.version, 7);
+    }
+
+    #[test]
+    fn stale_review_versions_are_rejected() {
+        let review = WebReviewState {
+            files: Vec::new(),
+            had_staged_changes_on_open: false,
+            version: 4,
+        };
+
+        assert!(ensure_fresh_review_version(&review, Some(4)).is_ok());
+        assert_eq!(
+            ensure_fresh_review_version(&review, Some(3))
+                .expect_err("stale version should fail")
+                .status,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            ensure_fresh_review_version(&review, None)
+                .expect_err("missing version should fail")
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
     fn explain_sessions_response_reflects_availability_and_selection() {
         let state = WebState {
             git: GitService::new("."),
@@ -984,6 +1103,7 @@ mod tests {
             )),
             settings: Mutex::new(AppSettings::default()),
             events: broadcast::channel(1).0,
+            operation: Mutex::new(()),
             explain: Mutex::new(WebExplainState {
                 sessions: Vec::new(),
                 selected_session_id: None,
@@ -995,6 +1115,7 @@ mod tests {
             review: Mutex::new(WebReviewState {
                 files: Vec::new(),
                 had_staged_changes_on_open: false,
+                version: 1,
             }),
         };
         let explain = WebExplainState {
