@@ -1,20 +1,25 @@
 import './styles.css';
+import { ApiClient, withStateVersion } from './api';
+import { byId, query, queryAll } from './dom';
+import { initialExplainHistory, initialExplainModels, initialExplainSessions, initialFocus, initialScreen, initialSettings } from './state';
+import type { ActionResponse, CommandItem, DiffLine, DiffLineKind, ExplainHistoryItem, ExplainHistoryResponse, ExplainModelsResponse, ExplainSessionsResponse, ExplainStartResponse, FileResponse, FocusTarget, HunkResponse, ReviewStateResponse, ReviewStatus, Screen, SettingsResponse, WebEventPayload } from './types';
 
 const token = new URLSearchParams(location.search).get('token');
-    let state = null;
-    let selectedFile = 0;
-    let selectedHunk = 0;
-    let focus = 'files';
-    let screen = 'home';
-    let paletteCursor = 0;
-    let settings = { has_github_token: false };
-    let explainSessions = { available: false, selected_session_id: null, sessions: [] };
-    let explainModels = { available: false, selected_model: null, models: [] };
-    let explainHistory = { runs: [] };
-    let eventSource = null;
-    let activeExplainRunId = null;
+const api = new ApiClient(token);
+let state: ReviewStateResponse | null = null;
+let selectedFile = 0;
+let selectedHunk = 0;
+let focus: FocusTarget = initialFocus;
+let screen: Screen = initialScreen;
+let paletteCursor = 0;
+let settings: SettingsResponse = initialSettings;
+let explainSessions: ExplainSessionsResponse = initialExplainSessions;
+let explainModels: ExplainModelsResponse = initialExplainModels;
+let explainHistory: ExplainHistoryResponse = initialExplainHistory;
+let eventSource: EventSource | null = null;
+let activeExplainRunId: number | null = null;
 
-    const iconFor = (file) => {
+    const iconFor = (file: FileResponse) => {
       if (file.is_binary) return '◈';
       switch (file.status) {
         case 'Added': return '+';
@@ -25,11 +30,11 @@ const token = new URLSearchParams(location.search).get('token');
         default: return file.hunks.length ? '✎' : '○';
       }
     };
-    const markerFor = (status) => status === 'Accepted' ? '[✓]' : status === 'Rejected' ? '[x]' : '[ ]';
-    const prefixFor = (kind) => kind === 'Add' ? '+' : kind === 'Remove' ? '-' : ' ';
-    const lineClass = (kind) => kind === 'Add' ? 'line-add' : kind === 'Remove' ? 'line-remove' : 'line-context';
+    const markerFor = (status: ReviewStatus) => status === 'Accepted' ? '[✓]' : status === 'Rejected' ? '[x]' : '[ ]';
+    const prefixFor = (kind: DiffLineKind) => kind === 'Add' ? '+' : kind === 'Remove' ? '-' : ' ';
+    const lineClass = (kind: DiffLineKind) => kind === 'Add' ? 'line-add' : kind === 'Remove' ? 'line-remove' : 'line-context';
 
-    function commandItems() {
+    function commandItems(): CommandItem[] {
       const file = currentFile();
       const reviewAvailable = !!state?.files.length;
       const inReview = screen === 'review' && reviewAvailable;
@@ -47,14 +52,14 @@ const token = new URLSearchParams(location.search).get('token');
         { label: 'Choose Explain context', detail: 'Select the opencode session used for Explain', shortcut: 'o', enabled: true, run: openSessionPicker },
         { label: 'Choose Explain model', detail: 'Select the model used for Explain', shortcut: 'm', enabled: true, run: openModelPicker },
         { label: 'Open Explain history', detail: 'Show explanations from this browser session', shortcut: 'h', enabled: true, run: openExplainHistory },
-        { label: 'Commit accepted changes', detail: 'Write a commit message for accepted changes', shortcut: 'c', enabled: reviewAvailable, run: () => document.getElementById('commitDialog').showModal() },
-        { label: 'Publish current branch', detail: 'Push the reviewed commit from the current branch', shortcut: 'p', enabled: true, run: () => document.getElementById('publishDialog').showModal() },
+        { label: 'Commit accepted changes', detail: 'Write a commit message for accepted changes', shortcut: 'c', enabled: reviewAvailable, run: () => byId('commitDialog').showModal() },
+        { label: 'Publish current branch', detail: 'Push the reviewed commit from the current branch', shortcut: 'p', enabled: true, run: () => byId('publishDialog').showModal() },
         { label: 'Open settings', detail: 'Configure GitHub token for HTTPS publishing', shortcut: 's', enabled: true, run: openSettings },
       ];
     }
 
     function filteredCommandItems() {
-      const query = document.getElementById('paletteInput').value.trim().toLowerCase();
+      const query = byId('paletteInput').value.trim().toLowerCase();
       const items = commandItems();
       if (!query) return items;
       return items.filter((item) => `${item.label} ${item.detail} ${item.shortcut}`.toLowerCase().includes(query));
@@ -62,15 +67,15 @@ const token = new URLSearchParams(location.search).get('token');
 
     function openCommandPalette() {
       paletteCursor = 0;
-      document.getElementById('paletteInput').value = '';
+      byId('paletteInput').value = '';
       renderCommandPalette();
-      document.getElementById('commandPalette').showModal();
-      document.getElementById('paletteInput').focus();
+      byId('commandPalette').showModal();
+      byId('paletteInput').focus();
       setStatus('Command palette opened.');
     }
 
     function renderCommandPalette() {
-      const list = document.getElementById('paletteList');
+      const list = byId('paletteList');
       const items = filteredCommandItems();
       paletteCursor = clamp(paletteCursor, 0, Math.max(0, items.length - 1));
       list.innerHTML = '';
@@ -79,9 +84,9 @@ const token = new URLSearchParams(location.search).get('token');
         const row = document.createElement('li');
         row.className = `palette-item ${index === paletteCursor ? 'selected' : ''} ${item.enabled ? '' : 'disabled'}`;
         row.innerHTML = `<div><strong></strong><span class="palette-detail"></span></div><span class="key"></span>`;
-        row.querySelector('strong').textContent = item.label;
-        row.querySelector('.palette-detail').textContent = item.detail;
-        row.querySelector('.key').textContent = item.shortcut;
+        query(row, 'strong').textContent = item.label;
+        query(row, '.palette-detail').textContent = item.detail;
+        query(row, '.key').textContent = item.shortcut;
         row.addEventListener('mouseenter', () => { paletteCursor = index; renderCommandPalette(); });
         row.addEventListener('click', () => runPaletteCommand(item));
         list.appendChild(row);
@@ -91,7 +96,7 @@ const token = new URLSearchParams(location.search).get('token');
     async function runPaletteCommand(item = filteredCommandItems()[paletteCursor]) {
       if (!item) return;
       if (!item.enabled) { setStatus(`${item.label} is unavailable right now.`); return; }
-      document.getElementById('commandPalette').close();
+      byId('commandPalette').close();
       await item.run();
     }
 
@@ -122,68 +127,57 @@ const token = new URLSearchParams(location.search).get('token');
       }
     }
 
-    async function request(path, options = {}) {
-      const separator = path.includes('?') ? '&' : '?';
-      const response = await fetch(`${path}${separator}token=${encodeURIComponent(token || '')}`, {
-        headers: { 'content-type': 'application/json', ...(options.headers || {}) },
-        ...options,
-      });
-      if (!response.ok) {
-        let message = await response.text();
-        try { message = JSON.parse(message).error || message; } catch (_) {}
-        throw new Error(message);
-      }
-      return response.json();
+    async function request<T = unknown>(path: string, options: RequestInit = {}): Promise<T> {
+      return api.request<T>(path, options);
     }
 
     async function loadState(message = 'Review state loaded.') {
-      settings = await request('/api/settings');
-      explainSessions = await request('/api/explain/sessions');
-      explainModels = await request('/api/explain/models');
-      explainHistory = await request('/api/explain/history');
+      settings = await request<SettingsResponse>('/api/settings');
+      explainSessions = await request<ExplainSessionsResponse>('/api/explain/sessions');
+      explainModels = await request<ExplainModelsResponse>('/api/explain/models');
+      explainHistory = await request<ExplainHistoryResponse>('/api/explain/history');
       renderSettingsStatus();
       renderExplainContext();
       renderExplainModel();
-      renderState(await request('/api/state'));
+      renderState(await request<ReviewStateResponse>('/api/state'));
       setStatus(message);
     }
 
     async function mutate(path, message) {
-      const separator = path.includes('?') ? '&' : '?';
-      const versionedPath = `${path}${separator}state_version=${encodeURIComponent(state?.version ?? '')}`;
-      const result = await request(versionedPath, { method: 'POST' });
+      const versionedPath = withStateVersion(path, state?.version);
+      const result = await request<ActionResponse>(versionedPath, { method: 'POST' });
       renderState(result.state);
       setStatus(result.message || message);
     }
 
     function renderSettingsStatus() {
-      document.getElementById('githubTokenStatus').textContent = settings.has_github_token ? 'GitHub token is saved.' : 'GitHub token is not set.';
+      byId('githubTokenStatus').textContent = settings.has_github_token ? 'GitHub token is saved.' : 'GitHub token is not set.';
     }
 
     async function openSettings() {
-      settings = await request('/api/settings');
+      settings = await request<SettingsResponse>('/api/settings');
       renderSettingsStatus();
-      document.getElementById('githubTokenInput').value = '';
-      document.getElementById('settingsDialog').showModal();
-      document.getElementById('githubTokenInput').focus();
+      byId('githubTokenInput').value = '';
+      byId('settingsDialog').showModal();
+      byId('githubTokenInput').focus();
       setStatus('Settings opened.');
     }
 
     async function saveGithubToken() {
-      settings = await request('/api/settings/github-token', {
+      settings = await request<SettingsResponse>('/api/settings/github-token', {
         method: 'POST',
-        body: JSON.stringify({ token: document.getElementById('githubTokenInput').value }),
+        body: JSON.stringify({ token: byId('githubTokenInput').value }),
       });
       renderSettingsStatus();
-      document.getElementById('settingsDialog').close();
-      document.getElementById('githubTokenInput').value = '';
+      byId('settingsDialog').close();
+      byId('githubTokenInput').value = '';
       setStatus(settings.has_github_token ? 'GitHub token saved.' : 'GitHub token cleared.');
     }
 
     async function publishCurrentBranch() {
-      const result = await request('/api/push', { method: 'POST' });
+      const result = await request<ActionResponse>('/api/push', { method: 'POST' });
       renderState(result.state);
-      document.getElementById('publishDialog').close();
+      byId('publishDialog').close();
       setStatus(result.message);
     }
 
@@ -199,7 +193,7 @@ const token = new URLSearchParams(location.search).get('token');
     }
 
     function renderExplainContext() {
-      const context = document.getElementById('explainContext');
+      const context = byId('explainContext');
       if (context) context.textContent = explainContextLabel();
     }
 
@@ -209,21 +203,21 @@ const token = new URLSearchParams(location.search).get('token');
     }
 
     function renderExplainModel() {
-      const model = document.getElementById('explainModel');
+      const model = byId('explainModel');
       if (model) model.textContent = explainModelLabel();
     }
 
     async function openSessionPicker() {
-      explainSessions = await request('/api/explain/sessions');
+      explainSessions = await request<ExplainSessionsResponse>('/api/explain/sessions');
       renderExplainContext();
       renderSessionList();
-      document.getElementById('sessionDialog').showModal();
+      byId('sessionDialog').showModal();
       setStatus('Choose an Explain context source.');
     }
 
     function renderSessionList() {
-      const status = document.getElementById('sessionStatus');
-      const list = document.getElementById('sessionList');
+      const status = byId('sessionStatus');
+      const list = byId('sessionList');
       list.innerHTML = '';
       if (!explainSessions.available) {
         status.textContent = 'Explain is unavailable because opencode is not ready.';
@@ -238,36 +232,36 @@ const token = new URLSearchParams(location.search).get('token');
         const row = document.createElement('li');
         row.className = `session-item ${session.id === explainSessions.selected_session_id ? 'selected' : ''}`;
         row.innerHTML = '<strong></strong><span class="muted mono"></span><span class="muted"></span>';
-        row.querySelector('strong').textContent = session.title || session.id;
-        row.querySelector('.mono').textContent = session.id;
-        row.querySelectorAll('.muted')[1].textContent = session.directory;
+        query(row, 'strong').textContent = session.title || session.id;
+        query(row, '.mono').textContent = session.id;
+        queryAll(row, '.muted')[1].textContent = session.directory;
         row.addEventListener('click', () => selectExplainSession(session.id).catch(showError));
         list.appendChild(row);
       });
     }
 
     async function selectExplainSession(sessionId) {
-      explainSessions = await request('/api/explain/session', {
+      explainSessions = await request<ExplainSessionsResponse>('/api/explain/session', {
         method: 'POST',
         body: JSON.stringify({ session_id: sessionId }),
       });
       renderExplainContext();
       renderSessionList();
-      document.getElementById('sessionDialog').close();
+      byId('sessionDialog').close();
       setStatus(`Explain will use context source ${explainContextLabel()}.`);
     }
 
     async function openModelPicker() {
-      explainModels = await request('/api/explain/models');
+      explainModels = await request<ExplainModelsResponse>('/api/explain/models');
       renderExplainModel();
       renderModelList();
-      document.getElementById('modelDialog').showModal();
+      byId('modelDialog').showModal();
       setStatus('Choose an Explain model.');
     }
 
     function renderModelList() {
-      const status = document.getElementById('modelStatus');
-      const list = document.getElementById('modelList');
+      const status = byId('modelStatus');
+      const list = byId('modelList');
       list.innerHTML = '';
       if (!explainModels.available) {
         status.textContent = 'Explain is unavailable because opencode is not ready.';
@@ -282,36 +276,36 @@ const token = new URLSearchParams(location.search).get('token');
       const row = document.createElement('li');
       row.className = `session-item ${model === explainModels.selected_model ? 'selected' : ''}`;
       row.innerHTML = '<strong></strong><span class="muted"></span>';
-      row.querySelector('strong').textContent = label;
-      row.querySelector('.muted').textContent = model ? 'Explicit model' : 'Use saved/session default when available';
+      query(row, 'strong').textContent = label;
+      query(row, '.muted').textContent = model ? 'Explicit model' : 'Use saved/session default when available';
       row.addEventListener('click', () => selectExplainModel(model).catch(showError));
       list.appendChild(row);
     }
 
     async function selectExplainModel(model) {
-      explainModels = await request('/api/explain/model', {
+      explainModels = await request<ExplainModelsResponse>('/api/explain/model', {
         method: 'POST',
         body: JSON.stringify({ model }),
       });
       renderExplainModel();
       renderModelList();
-      document.getElementById('modelDialog').close();
+      byId('modelDialog').close();
       setStatus(`Explain model set to ${explainModelLabel()}.`);
     }
 
     async function openExplainHistory(showDialog = true) {
-      explainHistory = await request('/api/explain/history');
+      explainHistory = await request<ExplainHistoryResponse>('/api/explain/history');
       renderExplainHistory();
       if (activeExplainRunId !== null) renderExplainRunAnswer(findExplainRun(activeExplainRunId));
       if (showDialog) {
-        document.getElementById('historyDialog').showModal();
+        byId('historyDialog').showModal();
         setStatus('Explain history opened.');
       }
     }
 
     function renderExplainHistory() {
-      const status = document.getElementById('historyStatus');
-      const list = document.getElementById('historyList');
+      const status = byId('historyStatus');
+      const list = byId('historyList');
       list.innerHTML = '';
       if (!explainHistory.runs.length) {
         status.textContent = 'No explanations in this session yet.';
@@ -322,37 +316,37 @@ const token = new URLSearchParams(location.search).get('token');
         const row = document.createElement('li');
         row.className = 'history-item';
         row.innerHTML = '<strong></strong><span class="muted"></span><span class="muted"></span>';
-        row.querySelector('strong').textContent = run.label;
-        row.querySelectorAll('.muted')[0].textContent = `${run.status} · ${run.model}`;
-        row.querySelectorAll('.muted')[1].textContent = historyPreview(run);
+        query(row, 'strong').textContent = run.label;
+        queryAll(row, '.muted')[0].textContent = `${run.status} · ${run.model}`;
+        queryAll(row, '.muted')[1].textContent = historyPreview(run);
         row.addEventListener('click', () => showExplainRun(run));
         list.appendChild(row);
       });
     }
 
-    function findExplainRun(id) {
+    function findExplainRun(id: number): ExplainHistoryItem | undefined {
       return explainHistory.runs.find((run) => run.id === id);
     }
 
-    function historyPreview(run) {
+    function historyPreview(run: ExplainHistoryItem): string {
       if (run.answer?.summary) return run.answer.summary;
       if (run.error) return run.error;
       return `run ${run.id}`;
     }
 
-    function showExplainRun(run) {
+    function showExplainRun(run: ExplainHistoryItem | undefined) {
       if (!run) return;
       activeExplainRunId = run.id;
-      document.getElementById('explainScope').textContent = run.label;
+      byId('explainScope').textContent = run.label;
       renderExplainRunAnswer(run);
-      document.getElementById('historyDialog').close();
-      const dialog = document.getElementById('explainDialog');
+      byId('historyDialog').close();
+      const dialog = byId('explainDialog');
       if (!dialog.open) dialog.showModal();
       setStatus(`Showing Explain run ${run.id}.`);
     }
 
-    function renderExplainRunAnswer(run) {
-      const answer = document.getElementById('explainAnswer');
+    function renderExplainRunAnswer(run: ExplainHistoryItem | null | undefined) {
+      const answer = byId('explainAnswer');
       answer.innerHTML = '';
       answer.classList.toggle('muted', !run?.answer);
       if (!run) {
@@ -377,7 +371,7 @@ const token = new URLSearchParams(location.search).get('token');
       renderExplainSection(answer, `Risk (${run.answer.risk_level})`, run.answer.risk_reason);
     }
 
-    function renderExplainSection(parent, title, text) {
+    function renderExplainSection(parent: HTMLElement, title: string, text: string) {
       const section = document.createElement('section');
       section.className = 'explain-section';
       const heading = document.createElement('strong');
@@ -388,6 +382,17 @@ const token = new URLSearchParams(location.search).get('token');
       parent.appendChild(section);
     }
 
+    function explainStartToHistory(run: ExplainStartResponse): ExplainHistoryItem {
+      return {
+        id: run.id,
+        label: run.label,
+        status: run.status,
+        model: explainModelLabel(),
+        answer: null,
+        error: null,
+      };
+    }
+
     function explainTargetLabel() {
       const file = currentFile();
       if (!file) return 'No selection';
@@ -396,14 +401,14 @@ const token = new URLSearchParams(location.search).get('token');
     }
 
     async function openExplainMenu() {
-      explainSessions = await request('/api/explain/sessions');
-      explainModels = await request('/api/explain/models');
-      document.getElementById('explainScope').textContent = explainTargetLabel();
+      explainSessions = await request<ExplainSessionsResponse>('/api/explain/sessions');
+      explainModels = await request<ExplainModelsResponse>('/api/explain/models');
+      byId('explainScope').textContent = explainTargetLabel();
       renderExplainContext();
       renderExplainModel();
       activeExplainRunId = null;
       renderExplainRunAnswer(null);
-      document.getElementById('explainDialog').showModal();
+      byId('explainDialog').showModal();
       setStatus('Explain menu opened.');
     }
 
@@ -414,28 +419,28 @@ const token = new URLSearchParams(location.search).get('token');
         file_index: selectedFile,
         hunk_index: focus === 'hunks' && file.hunks.length ? selectedHunk : null,
       };
-      const run = await request('/api/explain', {
+      const run = await request<ExplainStartResponse>('/api/explain', {
         method: 'POST',
         body: JSON.stringify(payload),
       });
       activeExplainRunId = run.id;
-      document.getElementById('explainScope').textContent = run.label;
-      explainHistory = await request('/api/explain/history');
+      byId('explainScope').textContent = run.label;
+      explainHistory = await request<ExplainHistoryResponse>('/api/explain/history');
       renderExplainHistory();
-      renderExplainRunAnswer(findExplainRun(run.id) || run);
+      renderExplainRunAnswer(findExplainRun(run.id) || explainStartToHistory(run));
       setStatus(`Explain started for ${run.label}.`);
     }
 
-    function renderState(nextState) {
+    function renderState(nextState: ReviewStateResponse | null) {
       state = nextState;
       selectedFile = clamp(selectedFile, 0, Math.max(0, state.files.length - 1));
       const file = currentFile();
       selectedHunk = clamp(selectedHunk, 0, Math.max(0, (file?.hunks.length || 1) - 1));
 
-      document.getElementById('repo').textContent = state.repo_path;
-      document.getElementById('pending').textContent = state.counts.unreviewed;
-      document.getElementById('accepted').textContent = state.counts.accepted;
-      document.getElementById('rejected').textContent = state.counts.rejected;
+      byId('repo').textContent = state.repo_path;
+      byId('pending').textContent = state.counts.unreviewed;
+      byId('accepted').textContent = state.counts.accepted;
+      byId('rejected').textContent = state.counts.rejected;
       if (!state.files.length) screen = 'home';
       renderHome();
       renderFiles();
@@ -446,9 +451,9 @@ const token = new URLSearchParams(location.search).get('token');
 
     function renderLayout() {
       const onHome = screen === 'home';
-      document.getElementById('home').classList.toggle('hidden', !onHome);
-      document.getElementById('workspace').classList.toggle('hidden', onHome);
-      document.getElementById('footer').classList.toggle('hidden', onHome);
+      byId('home').classList.toggle('hidden', !onHome);
+      byId('workspace').classList.toggle('hidden', onHome);
+      byId('footer').classList.toggle('hidden', onHome);
     }
 
     function renderHome() {
@@ -467,11 +472,11 @@ const token = new URLSearchParams(location.search).get('token');
         title = 'Nothing accepted';
         detail = 'Rejected changes stay in your worktree and are left out of the commit.';
       }
-      document.getElementById('homeTitle').innerHTML = `${title.replace('review', '<span>review</span>')}`;
-      document.getElementById('homeDetail').textContent = detail;
-      document.getElementById('homeProgress').style.width = `${progress}%`;
-      document.getElementById('homeCounts').textContent = `${state.counts.unreviewed} pending · ${state.counts.accepted} accepted · ${state.counts.rejected} rejected`;
-      document.getElementById('enterReview').disabled = !state.files.length;
+      byId('homeTitle').innerHTML = `${title.replace('review', '<span>review</span>')}`;
+      byId('homeDetail').textContent = detail;
+      byId('homeProgress').style.width = `${progress}%`;
+      byId('homeCounts').textContent = `${state.counts.unreviewed} pending · ${state.counts.accepted} accepted · ${state.counts.rejected} rejected`;
+      byId('enterReview').disabled = !state.files.length;
     }
 
     function enterReview() {
@@ -483,7 +488,7 @@ const token = new URLSearchParams(location.search).get('token');
     }
 
     function renderFiles() {
-      const files = document.getElementById('files');
+      const files = byId('files');
       files.innerHTML = '';
       if (!state.files.length) {
         files.innerHTML = '<li class="empty">No reviewable changes.<br><span class="muted">Run your agent, then refresh.</span></li>';
@@ -498,15 +503,15 @@ const token = new URLSearchParams(location.search).get('token');
           <span class="review-marker ${file.review_status.toLowerCase()}">${markerFor(file.review_status)}</span>
           <span class="file-label"><span class="file-icon">${iconFor(file)}</span> <span class="mono"></span></span>
           <span class="stats">+${stats.added} -${stats.removed}</span>`;
-        item.querySelector('.mono').textContent = file.display_label;
+        query(item, '.mono').textContent = file.display_label;
         item.addEventListener('click', () => { selectedFile = index; selectedHunk = 0; focus = 'files'; screen = 'review'; renderState(state); });
         files.appendChild(item);
       });
     }
 
     function renderDiff() {
-      const diff = document.getElementById('diff');
-      const title = document.getElementById('diffTitle');
+      const diff = byId('diff');
+      const title = byId('diffTitle');
       const file = currentFile();
       diff.innerHTML = '';
       if (!file) {
@@ -534,17 +539,17 @@ const token = new URLSearchParams(location.search).get('token');
             </div>
           </div>
           <table class="diff-table"><tbody></tbody></table>`;
-        section.querySelector('code').textContent = hunk.header;
-        section.querySelector('[data-action="accept-hunk"]').addEventListener('click', () => mutate(`/api/files/${selectedFile}/hunks/${hunkIndex}/accept`, 'Accepted hunk.').catch(showError));
-        section.querySelector('[data-action="reject-hunk"]').addEventListener('click', () => mutate(`/api/files/${selectedFile}/hunks/${hunkIndex}/reject`, 'Rejected hunk.').catch(showError));
-        const body = section.querySelector('tbody');
+        query(section, 'code').textContent = hunk.header;
+        query(section, '[data-action="accept-hunk"]').addEventListener('click', () => mutate(`/api/files/${selectedFile}/hunks/${hunkIndex}/accept`, 'Accepted hunk.').catch(showError));
+        query(section, '[data-action="reject-hunk"]').addEventListener('click', () => mutate(`/api/files/${selectedFile}/hunks/${hunkIndex}/reject`, 'Rejected hunk.').catch(showError));
+        const body = query(section, 'tbody');
         hunk.lines.forEach((line) => body.appendChild(renderDiffLine(line)));
         diff.appendChild(section);
       });
       scrollSelectedHunkIntoView();
     }
 
-    function renderDiffLine(line) {
+    function renderDiffLine(line: DiffLine) {
       const row = document.createElement('tr');
       row.className = lineClass(line.kind);
       row.innerHTML = `
@@ -552,20 +557,20 @@ const token = new URLSearchParams(location.search).get('token');
         <td class="line-no">${line.new_line ?? ''}</td>
         <td class="line-prefix">${prefixFor(line.kind)}</td>
         <td class="line-content"></td>`;
-      row.querySelector('.line-content').textContent = line.content;
+      query(row, '.line-content').textContent = line.content;
       return row;
     }
 
     function renderFooter() {
       const file = currentFile();
-      document.getElementById('position').textContent = `${state.files.length ? selectedFile + 1 : 0} / ${state.files.length}`;
-      document.getElementById('footerPath').textContent = file ? file.display_label : 'No selection';
-      document.getElementById('focusLabel').textContent = file && focus === 'hunks' ? `hunk ${selectedHunk + 1}/${Math.max(file.hunks.length, 1)}` : 'file';
+      byId('position').textContent = `${state.files.length ? selectedFile + 1 : 0} / ${state.files.length}`;
+      byId('footerPath').textContent = file ? file.display_label : 'No selection';
+      byId('focusLabel').textContent = file && focus === 'hunks' ? `hunk ${selectedHunk + 1}/${Math.max(file.hunks.length, 1)}` : 'file';
       const stats = file ? lineStats(file) : { added: 0, removed: 0 };
-      document.getElementById('lineStats').textContent = `+${stats.added} -${stats.removed}`;
+      byId('lineStats').textContent = `+${stats.added} -${stats.removed}`;
     }
 
-    function lineStats(file) {
+    function lineStats(file: FileResponse) {
       return file.hunks.reduce((stats, hunk) => {
         hunk.lines.forEach((line) => {
           if (line.kind === 'Add') stats.added += 1;
@@ -575,10 +580,10 @@ const token = new URLSearchParams(location.search).get('token');
       }, { added: 0, removed: 0 });
     }
 
-    function currentFile() { return state?.files[selectedFile]; }
-    function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
-    function setStatus(message) { document.getElementById('status').textContent = message; document.getElementById('homeStatus').textContent = message; }
-    function showError(error) { setStatus(error.message); }
+    function currentFile(): FileResponse | undefined { return state?.files[selectedFile]; }
+    function clamp(value: number, min: number, max: number) { return Math.min(max, Math.max(min, value)); }
+    function setStatus(message: string) { byId('status').textContent = message; byId('homeStatus').textContent = message; }
+    function showError(error: Error) { setStatus(error.message); }
     function scrollSelectedHunkIntoView() {
       if (focus !== 'hunks') return;
       document.querySelector('.hunk.selected')?.scrollIntoView({ block: 'nearest' });
@@ -607,41 +612,41 @@ const token = new URLSearchParams(location.search).get('token');
       await mutate(`/api/files/${selectedFile}/unreview`, 'Moved file back to unreviewed.');
     }
 
-    document.getElementById('refresh').addEventListener('click', () => mutate('/api/refresh', 'Refreshed review queue.').catch(showError));
-    document.getElementById('homeRefresh').addEventListener('click', () => mutate('/api/refresh', 'Refreshed review queue.').catch(showError));
-    document.getElementById('enterReview').addEventListener('click', enterReview);
-    document.getElementById('homeCommit').addEventListener('click', () => document.getElementById('commitDialog').showModal());
-    document.getElementById('openSettings').addEventListener('click', () => openSettings().catch(showError));
-    document.getElementById('acceptCurrent').addEventListener('click', () => acceptCurrent().catch(showError));
-    document.getElementById('rejectCurrent').addEventListener('click', () => rejectCurrent().catch(showError));
-    document.getElementById('unreviewCurrent').addEventListener('click', () => unreviewCurrent().catch(showError));
-    document.getElementById('openExplain').addEventListener('click', () => openExplainMenu().catch(showError));
-    document.getElementById('chooseExplainContext').addEventListener('click', (event) => { event.preventDefault(); openSessionPicker().catch(showError); });
-    document.getElementById('chooseExplainModel').addEventListener('click', (event) => { event.preventDefault(); openModelPicker().catch(showError); });
-    document.getElementById('openExplainHistory').addEventListener('click', (event) => { event.preventDefault(); openExplainHistory().catch(showError); });
-    document.getElementById('requestExplain').addEventListener('click', (event) => { event.preventDefault(); requestExplainPreview(); });
-    document.getElementById('openCommit').addEventListener('click', () => document.getElementById('commitDialog').showModal());
-    document.getElementById('publishCurrent').addEventListener('click', () => document.getElementById('publishDialog').showModal());
-    document.getElementById('submitPublish').addEventListener('click', (event) => { event.preventDefault(); publishCurrentBranch().catch(showError); });
-    document.getElementById('saveGithubToken').addEventListener('click', (event) => { event.preventDefault(); saveGithubToken().catch(showError); });
-    document.getElementById('paletteInput').addEventListener('input', () => { paletteCursor = 0; renderCommandPalette(); });
-    document.getElementById('paletteInput').addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') { document.getElementById('commandPalette').close(); setStatus('Command palette closed.'); event.preventDefault(); }
+    byId('refresh').addEventListener('click', () => mutate('/api/refresh', 'Refreshed review queue.').catch(showError));
+    byId('homeRefresh').addEventListener('click', () => mutate('/api/refresh', 'Refreshed review queue.').catch(showError));
+    byId('enterReview').addEventListener('click', enterReview);
+    byId('homeCommit').addEventListener('click', () => byId('commitDialog').showModal());
+    byId('openSettings').addEventListener('click', () => openSettings().catch(showError));
+    byId('acceptCurrent').addEventListener('click', () => acceptCurrent().catch(showError));
+    byId('rejectCurrent').addEventListener('click', () => rejectCurrent().catch(showError));
+    byId('unreviewCurrent').addEventListener('click', () => unreviewCurrent().catch(showError));
+    byId('openExplain').addEventListener('click', () => openExplainMenu().catch(showError));
+    byId('chooseExplainContext').addEventListener('click', (event) => { event.preventDefault(); openSessionPicker().catch(showError); });
+    byId('chooseExplainModel').addEventListener('click', (event) => { event.preventDefault(); openModelPicker().catch(showError); });
+    byId('openExplainHistory').addEventListener('click', (event) => { event.preventDefault(); openExplainHistory().catch(showError); });
+    byId('requestExplain').addEventListener('click', (event) => { event.preventDefault(); requestExplainPreview(); });
+    byId('openCommit').addEventListener('click', () => byId('commitDialog').showModal());
+    byId('publishCurrent').addEventListener('click', () => byId('publishDialog').showModal());
+    byId('submitPublish').addEventListener('click', (event) => { event.preventDefault(); publishCurrentBranch().catch(showError); });
+    byId('saveGithubToken').addEventListener('click', (event) => { event.preventDefault(); saveGithubToken().catch(showError); });
+    byId('paletteInput').addEventListener('input', () => { paletteCursor = 0; renderCommandPalette(); });
+    byId('paletteInput').addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') { byId('commandPalette').close(); setStatus('Command palette closed.'); event.preventDefault(); }
       else if (event.key === 'ArrowDown' || event.key === 'j') { paletteCursor += 1; renderCommandPalette(); event.preventDefault(); }
       else if (event.key === 'ArrowUp' || event.key === 'k') { paletteCursor -= 1; renderCommandPalette(); event.preventDefault(); }
       else if (event.key === 'Enter') { runPaletteCommand().catch(showError); event.preventDefault(); }
     });
 
-    document.getElementById('submitCommit').addEventListener('click', async (event) => {
+    byId('submitCommit').addEventListener('click', async (event) => {
       event.preventDefault();
       try {
-        const message = document.getElementById('commitMessage').value;
-        const result = await request('/api/commit', { method: 'POST', body: JSON.stringify({ message, state_version: state?.version }) });
-        document.getElementById('commitDialog').close();
-        document.getElementById('commitMessage').value = '';
+        const message = byId('commitMessage').value;
+        const result = await request<ActionResponse>('/api/commit', { method: 'POST', body: JSON.stringify({ message, state_version: state?.version }) });
+        byId('commitDialog').close();
+        byId('commitMessage').value = '';
         renderState(result.state);
         setStatus(result.message);
-        document.getElementById('publishDialog').showModal();
+        byId('publishDialog').showModal();
       } catch (error) { showError(error); }
     });
 
@@ -651,13 +656,13 @@ const token = new URLSearchParams(location.search).get('token');
         openCommandPalette();
         return;
       }
-      if (event.target.closest('textarea, dialog')) return;
+      if ((event.target as Element | null)?.closest('textarea, dialog')) return;
       const file = currentFile();
       if (screen === 'home') {
         if (event.key === 'Enter') { enterReview(); event.preventDefault(); }
         else if (event.key === 'r') { mutate('/api/refresh', 'Refreshed review queue.').catch(showError); event.preventDefault(); }
-        else if (event.key === 'c') { document.getElementById('commitDialog').showModal(); event.preventDefault(); }
-        else if (event.key === 'p') { document.getElementById('publishDialog').showModal(); event.preventDefault(); }
+        else if (event.key === 'c') { byId('commitDialog').showModal(); event.preventDefault(); }
+        else if (event.key === 'p') { byId('publishDialog').showModal(); event.preventDefault(); }
         else if (event.key === 's') { openSettings().catch(showError); event.preventDefault(); }
         else if (event.key === 'o') { openSessionPicker().catch(showError); event.preventDefault(); }
         else if (event.key === 'm') { openModelPicker().catch(showError); event.preventDefault(); }
@@ -687,8 +692,8 @@ const token = new URLSearchParams(location.search).get('token');
       else if (event.key === 'm') openModelPicker().catch(showError);
       else if (event.key === 'h') openExplainHistory().catch(showError);
       else if (event.key === 'r') mutate('/api/refresh', 'Refreshed review queue.').catch(showError);
-      else if (event.key === 'c') document.getElementById('commitDialog').showModal();
-      else if (event.key === 'p') document.getElementById('publishDialog').showModal();
+      else if (event.key === 'c') byId('commitDialog').showModal();
+      else if (event.key === 'p') byId('publishDialog').showModal();
       else if (event.key === 's') openSettings().catch(showError);
     });
 
