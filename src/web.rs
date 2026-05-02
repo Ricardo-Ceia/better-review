@@ -19,7 +19,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::domain::diff::{FileDiff, Hunk, ReviewStatus};
 use crate::services::git::{GitService, PushFailure};
 use crate::services::opencode::{
-    OpencodeService, OpencodeSession, why_target_for_file, why_target_for_hunk,
+    OpencodeService, OpencodeSession, WhyAnswer, why_target_for_file, why_target_for_hunk,
 };
 use crate::settings::{AppSettings, SettingsStore};
 
@@ -179,6 +179,17 @@ struct WebExplainHistoryItem {
     label: String,
     model: String,
     status: String,
+    answer: Option<WebExplainAnswer>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct WebExplainAnswer {
+    summary: String,
+    purpose: String,
+    change: String,
+    risk_level: String,
+    risk_reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -448,6 +459,8 @@ async fn api_request_explain(
         label: label.clone(),
         model: model_label.clone(),
         status: "Running".to_string(),
+        answer: None,
+        error: None,
     });
     drop(explain);
 
@@ -463,14 +476,29 @@ async fn api_request_explain(
         let result = opencode
             .ask_why(&session_id, &target, model.as_deref())
             .await;
-        let (status, message) = match result {
-            Ok(_) => ("Ready", format!("Loaded explanation for {label_for_task}.")),
-            Err(error) => ("Failed", format!("Explain failed: {error}")),
+        let (status, message, answer, error) = match result {
+            Ok(answer) => (
+                "Ready",
+                format!("Loaded explanation for {label_for_task}."),
+                Some(WebExplainAnswer::from(answer)),
+                None,
+            ),
+            Err(error) => {
+                let error = error.to_string();
+                (
+                    "Failed",
+                    format!("Explain failed: {error}"),
+                    None,
+                    Some(error),
+                )
+            }
         };
         {
             let mut explain = state_for_task.explain.lock().await;
             if let Some(run) = explain.history.iter_mut().find(|run| run.id == id) {
                 run.status = status.to_string();
+                run.answer = answer;
+                run.error = error;
             }
         }
         emit_event(&state_for_task, "explain_finished", message, Some(id));
@@ -777,6 +805,18 @@ fn bump_count(counts: &mut ReviewCountsResponse, status: &ReviewStatus) {
     }
 }
 
+impl From<WhyAnswer> for WebExplainAnswer {
+    fn from(answer: WhyAnswer) -> Self {
+        Self {
+            summary: answer.summary,
+            purpose: answer.purpose,
+            change: answer.change,
+            risk_level: format!("{:?}", answer.risk_level),
+            risk_reason: answer.risk_reason,
+        }
+    }
+}
+
 impl From<OpencodeSession> for WebSessionResponse {
     fn from(session: OpencodeSession) -> Self {
         Self {
@@ -972,6 +1012,14 @@ mod tests {
                 label: "file src/lib.rs".to_string(),
                 model: "Auto".to_string(),
                 status: "Ready".to_string(),
+                answer: Some(WebExplainAnswer {
+                    summary: "summary".to_string(),
+                    purpose: "purpose".to_string(),
+                    change: "change".to_string(),
+                    risk_level: "Low".to_string(),
+                    risk_reason: "low risk".to_string(),
+                }),
+                error: None,
             }],
             next_history_id: 2,
         };
@@ -988,6 +1036,22 @@ mod tests {
             Some("openai/gpt-5".to_string())
         );
         assert_eq!(model_response.models, vec!["openai/gpt-5".to_string()]);
+    }
+
+    #[test]
+    fn web_explain_answer_maps_opencode_answer() {
+        let answer = WebExplainAnswer::from(WhyAnswer {
+            summary: "Summarizes the change".to_string(),
+            purpose: "Explains the purpose".to_string(),
+            change: "Describes the implementation".to_string(),
+            risk_level: crate::services::opencode::WhyRiskLevel::High,
+            risk_reason: "Touches publish flow".to_string(),
+            fork_session_id: "ses_fork".to_string(),
+        });
+
+        assert_eq!(answer.summary, "Summarizes the change");
+        assert_eq!(answer.risk_level, "High");
+        assert_eq!(answer.risk_reason, "Touches publish flow");
     }
 
     #[test]

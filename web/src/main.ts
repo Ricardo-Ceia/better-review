@@ -12,6 +12,7 @@ const token = new URLSearchParams(location.search).get('token');
     let explainModels = { available: false, selected_model: null, models: [] };
     let explainHistory = { runs: [] };
     let eventSource = null;
+    let activeExplainRunId = null;
 
     const iconFor = (file) => {
       if (file.is_binary) return '◈';
@@ -109,7 +110,13 @@ const token = new URLSearchParams(location.search).get('token');
       try {
         const payload = JSON.parse(event.data);
         setStatus(payload.message);
-        if (refreshHistory) openExplainHistory(false).catch(showError);
+        if (refreshHistory) {
+          openExplainHistory(false)
+            .then(() => {
+              if (payload.run_id === activeExplainRunId) renderExplainRunAnswer(findExplainRun(payload.run_id));
+            })
+            .catch(showError);
+        }
       } catch (_) {
         setStatus(event.data || 'Received live update.');
       }
@@ -293,6 +300,7 @@ const token = new URLSearchParams(location.search).get('token');
     async function openExplainHistory(showDialog = true) {
       explainHistory = await request('/api/explain/history');
       renderExplainHistory();
+      if (activeExplainRunId !== null) renderExplainRunAnswer(findExplainRun(activeExplainRunId));
       if (showDialog) {
         document.getElementById('historyDialog').showModal();
         setStatus('Explain history opened.');
@@ -307,16 +315,75 @@ const token = new URLSearchParams(location.search).get('token');
         status.textContent = 'No explanations in this session yet.';
         return;
       }
-      status.textContent = 'Explain runs from this browser session.';
+      status.textContent = 'Explain runs from this browser session. Select a run to show its answer.';
       explainHistory.runs.forEach((run) => {
         const row = document.createElement('li');
         row.className = 'history-item';
         row.innerHTML = '<strong></strong><span class="muted"></span><span class="muted"></span>';
         row.querySelector('strong').textContent = run.label;
         row.querySelectorAll('.muted')[0].textContent = `${run.status} · ${run.model}`;
-        row.querySelectorAll('.muted')[1].textContent = `run ${run.id}`;
+        row.querySelectorAll('.muted')[1].textContent = historyPreview(run);
+        row.addEventListener('click', () => showExplainRun(run));
         list.appendChild(row);
       });
+    }
+
+    function findExplainRun(id) {
+      return explainHistory.runs.find((run) => run.id === id);
+    }
+
+    function historyPreview(run) {
+      if (run.answer?.summary) return run.answer.summary;
+      if (run.error) return run.error;
+      return `run ${run.id}`;
+    }
+
+    function showExplainRun(run) {
+      if (!run) return;
+      activeExplainRunId = run.id;
+      document.getElementById('explainScope').textContent = run.label;
+      renderExplainRunAnswer(run);
+      document.getElementById('historyDialog').close();
+      const dialog = document.getElementById('explainDialog');
+      if (!dialog.open) dialog.showModal();
+      setStatus(`Showing Explain run ${run.id}.`);
+    }
+
+    function renderExplainRunAnswer(run) {
+      const answer = document.getElementById('explainAnswer');
+      answer.innerHTML = '';
+      answer.classList.toggle('muted', !run?.answer);
+      if (!run) {
+        answer.textContent = 'No explanation has been requested yet.';
+        return;
+      }
+      if (run.status === 'Running') {
+        answer.textContent = `Running Explain for ${run.label} with ${run.model}.`;
+        return;
+      }
+      if (run.status === 'Failed') {
+        answer.textContent = run.error || 'Explain failed.';
+        return;
+      }
+      if (!run.answer) {
+        answer.textContent = `${run.status} · no answer payload was returned.`;
+        return;
+      }
+      renderExplainSection(answer, 'Summary', run.answer.summary);
+      renderExplainSection(answer, 'Purpose', run.answer.purpose);
+      renderExplainSection(answer, 'Change', run.answer.change);
+      renderExplainSection(answer, `Risk (${run.answer.risk_level})`, run.answer.risk_reason);
+    }
+
+    function renderExplainSection(parent, title, text) {
+      const section = document.createElement('section');
+      section.className = 'explain-section';
+      const heading = document.createElement('strong');
+      heading.textContent = title;
+      const body = document.createElement('p');
+      body.textContent = text || 'Not provided.';
+      section.append(heading, body);
+      parent.appendChild(section);
     }
 
     function explainTargetLabel() {
@@ -332,7 +399,8 @@ const token = new URLSearchParams(location.search).get('token');
       document.getElementById('explainScope').textContent = explainTargetLabel();
       renderExplainContext();
       renderExplainModel();
-      document.getElementById('explainAnswer').textContent = 'No explanation has been requested yet.';
+      activeExplainRunId = null;
+      renderExplainRunAnswer(null);
       document.getElementById('explainDialog').showModal();
       setStatus('Explain menu opened.');
     }
@@ -348,8 +416,11 @@ const token = new URLSearchParams(location.search).get('token');
         method: 'POST',
         body: JSON.stringify(payload),
       });
-      document.getElementById('explainAnswer').textContent = `Started ${run.label}. Watch status and history for completion.`;
+      activeExplainRunId = run.id;
+      document.getElementById('explainScope').textContent = run.label;
       explainHistory = await request('/api/explain/history');
+      renderExplainHistory();
+      renderExplainRunAnswer(findExplainRun(run.id) || run);
       setStatus(`Explain started for ${run.label}.`);
     }
 
