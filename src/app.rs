@@ -1,4 +1,5 @@
 mod command_palette;
+mod explain_history;
 mod github_token;
 mod keybindings;
 mod model_picker;
@@ -31,7 +32,6 @@ use ratatui_core::widgets::Widget;
 use ratatui_interact::components::{AnimatedText, AnimatedTextState, AnimatedTextStyle};
 use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use crate::domain::diff::{
     DiffLineKind, FileDiff, FileStatus, Hunk, ReviewCounts, ReviewStatus, count_review_statuses,
@@ -56,6 +56,13 @@ use self::command_palette::{
     CommandPaletteUiState, draw_command_palette, handle_command_palette_key,
     is_command_palette_key, open_command_palette,
 };
+use self::explain_history::{
+    ExplainRun, ExplainRunStatus, cancel_current_explain, explain_run_status_label,
+    explain_run_status_style, find_explain_run_index_by_id, find_reusable_explain_run_index,
+    handle_explain_history_key, next_explain_run_id, open_explain_history, selected_history_run,
+};
+#[cfg(test)]
+use self::explain_history::{clear_history_run, current_explain_run, move_explain_history_cursor};
 use self::github_token::{
     draw_github_token_prompt, handle_github_token_prompt_key, open_github_token_prompt,
 };
@@ -216,28 +223,6 @@ struct WhyThisUiState {
     model: WhyModelState,
     model_override: Option<WhyModelChoice>,
     return_to_menu: bool,
-}
-
-struct ExplainRun {
-    id: u64,
-    label: String,
-    target: WhyTarget,
-    context_source_id: String,
-    context_source_label: String,
-    requested_model: Option<String>,
-    model_label: String,
-    cache_key: String,
-    status: ExplainRunStatus,
-    result: Option<WhyAnswer>,
-    error: Option<String>,
-    handle: Option<JoinHandle<()>>,
-}
-
-enum ExplainRunStatus {
-    Running,
-    Ready,
-    Failed,
-    Cancelled,
 }
 
 #[derive(Default)]
@@ -964,27 +949,6 @@ fn handle_session_picker_key(app: &mut App, key: KeyEvent) {
                 app.status = format!("Explain will use context source {}.", session.title);
             }
         }
-        _ => {}
-    }
-}
-
-fn handle_explain_history_key(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => {
-            close_explain_submenu(app, "Closed Explain history.");
-        }
-        KeyCode::Up => move_explain_history_cursor(app, -1),
-        _ if key_matches(app, key, KeybindingCommand::MoveUp) => {
-            move_explain_history_cursor(app, -1)
-        }
-        KeyCode::Down => move_explain_history_cursor(app, 1),
-        _ if key_matches(app, key, KeybindingCommand::MoveDown) => {
-            move_explain_history_cursor(app, 1)
-        }
-        KeyCode::Enter => focus_history_run(app),
-        _ if key_matches(app, key, KeybindingCommand::ExplainRetry) => retry_history_run(app),
-        _ if key_matches(app, key, KeybindingCommand::ExplainCancel) => cancel_history_run(app),
-        KeyCode::Backspace | KeyCode::Delete => clear_history_run(app),
         _ => {}
     }
 }
@@ -3084,130 +3048,6 @@ fn render_explain_run_lines(
     lines
 }
 
-fn next_explain_run_id(why_this: &mut WhyThisUiState) -> u64 {
-    why_this.next_run_id = why_this.next_run_id.saturating_add(1);
-    why_this.next_run_id
-}
-
-fn find_explain_run_index_by_id(why_this: &WhyThisUiState, run_id: u64) -> Option<usize> {
-    why_this.runs.iter().position(|run| run.id == run_id)
-}
-
-fn find_reusable_explain_run_index(why_this: &WhyThisUiState, cache_key: &str) -> Option<usize> {
-    why_this.runs.iter().position(|run| {
-        run.cache_key == cache_key
-            && matches!(
-                run.status,
-                ExplainRunStatus::Running | ExplainRunStatus::Ready
-            )
-    })
-}
-
-#[cfg(test)]
-fn current_explain_run(app: &App) -> Option<&ExplainRun> {
-    let run_id = app.why_this.current_run_id?;
-    app.why_this.runs.iter().find(|run| run.id == run_id)
-}
-
-fn selected_history_run(app: &App) -> Option<&ExplainRun> {
-    app.why_this.runs.get(app.why_this.history_cursor)
-}
-
-fn move_explain_history_cursor(app: &mut App, delta: isize) {
-    if app.why_this.runs.is_empty() {
-        app.status = "No explain runs yet.".to_string();
-        return;
-    }
-
-    let len = app.why_this.runs.len() as isize;
-    let current = app.why_this.history_cursor as isize;
-    let next = (current + delta).rem_euclid(len) as usize;
-    app.why_this.history_cursor = next;
-    if let Some(run) = app.why_this.runs.get(next) {
-        app.status = format!("Selected explain run #{}.", run.id);
-    }
-}
-
-fn focus_history_run(app: &mut App) {
-    let Some(run_id) = selected_history_run(app).map(|run| run.id) else {
-        app.status = "No explain run selected.".to_string();
-        return;
-    };
-
-    app.why_this.current_run_id = Some(run_id);
-    app.overlay = Overlay::None;
-    app.why_this.return_to_menu = false;
-    app.status = format!("Focused explain run #{}.", run_id);
-}
-
-fn cancel_run_by_index(app: &mut App, index: usize) {
-    let Some(run) = app.why_this.runs.get_mut(index) else {
-        app.status = "Selected explain run no longer exists.".to_string();
-        return;
-    };
-
-    if !matches!(run.status, ExplainRunStatus::Running) {
-        app.status = format!("Explain run #{} is not running.", run.id);
-        return;
-    };
-
-    if let Some(handle) = run.handle.take() {
-        handle.abort();
-    }
-    run.status = ExplainRunStatus::Cancelled;
-    run.error = None;
-    app.status = format!("Cancelled explain run #{}.", run.id);
-}
-
-fn cancel_current_explain(app: &mut App) {
-    let Some(run_id) = app.why_this.current_run_id else {
-        app.status = "No current explain run.".to_string();
-        return;
-    };
-
-    if let Some(index) = find_explain_run_index_by_id(&app.why_this, run_id) {
-        cancel_run_by_index(app, index);
-    }
-}
-
-fn cancel_history_run(app: &mut App) {
-    cancel_run_by_index(app, app.why_this.history_cursor);
-}
-
-fn clear_run_by_index(app: &mut App, index: usize) {
-    let Some(run) = app.why_this.runs.get(index) else {
-        app.status = "Selected explain run no longer exists.".to_string();
-        return;
-    };
-
-    if matches!(run.status, ExplainRunStatus::Running) {
-        app.status = format!(
-            "Explain run #{} is still running. Press {} to cancel it.",
-            run.id,
-            key_status_label(app, KeybindingCommand::ExplainCancel)
-        );
-        return;
-    }
-
-    let removed = app.why_this.runs.remove(index);
-    if app.why_this.current_run_id == Some(removed.id) {
-        app.why_this.current_run_id = app.why_this.runs.last().map(|run| run.id);
-    }
-    if app.why_this.runs.is_empty() {
-        app.why_this.history_cursor = 0;
-        if app.overlay == Overlay::ExplainHistory {
-            app.overlay = Overlay::None;
-        }
-    } else {
-        app.why_this.history_cursor = index.min(app.why_this.runs.len().saturating_sub(1));
-    }
-    app.status = format!("Cleared explain run #{}.", removed.id);
-}
-
-fn clear_history_run(app: &mut App) {
-    clear_run_by_index(app, app.why_this.history_cursor);
-}
-
 fn open_explain_menu(app: &mut App) {
     app.overlay = Overlay::ExplainMenu;
     app.why_this.return_to_menu = true;
@@ -3236,24 +3076,12 @@ fn close_explain_submenu(app: &mut App, status: &str) {
     app.status = status.to_string();
 }
 
-fn open_explain_history(app: &mut App) {
-    app.overlay = Overlay::ExplainHistory;
-    app.status = "Opened Explain history.".to_string();
-}
-
 async fn retry_current_explain(app: &mut App) -> Result<()> {
     let Some(run_id) = app.why_this.current_run_id else {
         app.status = "No current explain run.".to_string();
         return Ok(());
     };
     retry_run_by_id(app, run_id).await
-}
-
-fn retry_history_run(app: &mut App) {
-    if let Some(run_id) = selected_history_run(app).map(|run| run.id) {
-        app.why_this.current_run_id = Some(run_id);
-        app.status = format!("Focused explain run #{} for retry.", run_id);
-    }
 }
 
 async fn retry_run_by_id(app: &mut App, run_id: u64) -> Result<()> {
@@ -3280,24 +3108,6 @@ async fn retry_run_by_id(app: &mut App, run_id: u64) -> Result<()> {
         run.model_label.clone(),
     )
     .await
-}
-
-fn explain_run_status_label(status: &ExplainRunStatus) -> &'static str {
-    match status {
-        ExplainRunStatus::Running => "running",
-        ExplainRunStatus::Ready => "ready",
-        ExplainRunStatus::Failed => "failed",
-        ExplainRunStatus::Cancelled => "cancelled",
-    }
-}
-
-fn explain_run_status_style(status: &ExplainRunStatus) -> Style {
-    match status {
-        ExplainRunStatus::Running => styles::accent_bold(),
-        ExplainRunStatus::Ready => Style::default().fg(styles::success()),
-        ExplainRunStatus::Failed => Style::default().fg(styles::danger()),
-        ExplainRunStatus::Cancelled => styles::muted(),
-    }
 }
 
 fn explain_context_source_label(app: &App) -> String {
