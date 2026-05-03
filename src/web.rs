@@ -70,6 +70,10 @@ pub async fn run() -> Result<()> {
         .route("/api/refresh", post(api_refresh))
         .route("/api/settings", get(api_settings))
         .route("/api/settings/github-token", post(api_save_github_token))
+        .route(
+            "/api/settings/default-explain-model",
+            post(api_save_default_explain_model),
+        )
         .route("/api/explain/sessions", get(api_explain_sessions))
         .route("/api/explain/session", post(api_select_explain_session))
         .route("/api/explain/models", get(api_explain_models))
@@ -243,6 +247,7 @@ struct WebEvent {
 #[derive(Debug, Serialize)]
 struct SettingsResponse {
     has_github_token: bool,
+    default_explain_model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -334,6 +339,26 @@ async fn api_save_github_token(
     let mut settings = state.settings.lock().await;
     let token = payload.token.trim().to_string();
     settings.github.token = if token.is_empty() { None } else { Some(token) };
+    state.settings_store.save(&settings)?;
+    Ok(Json(settings_response(&settings)))
+}
+
+async fn api_save_default_explain_model(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+    Json(payload): Json<ExplainModelRequest>,
+) -> Result<Json<SettingsResponse>, ApiError> {
+    ensure_authorized(&state, &auth)?;
+    if let Some(model) = &payload.model {
+        refresh_explain_models(&state).await;
+        let explain = state.explain.lock().await;
+        if !explain.models.iter().any(|candidate| candidate == model) {
+            return Err(ApiError::not_found("Explain model was not found"));
+        }
+    }
+
+    let mut settings = state.settings.lock().await;
+    settings.explain.default_model = payload.model;
     state.settings_store.save(&settings)?;
     Ok(Json(settings_response(&settings)))
 }
@@ -777,6 +802,7 @@ fn explain_models_response(state: &WebState, explain: &WebExplainState) -> Expla
 fn settings_response(settings: &AppSettings) -> SettingsResponse {
     SettingsResponse {
         has_github_token: settings.github.token.is_some(),
+        default_explain_model: settings.explain.default_model.clone(),
     }
 }
 
@@ -1149,10 +1175,18 @@ mod tests {
     #[test]
     fn settings_response_redacts_github_token() {
         let mut settings = AppSettings::default();
-        assert!(!settings_response(&settings).has_github_token);
+        let response = settings_response(&settings);
+        assert!(!response.has_github_token);
+        assert_eq!(response.default_explain_model, None);
 
         settings.github.token = Some("secret-token".to_string());
-        assert!(settings_response(&settings).has_github_token);
+        settings.explain.default_model = Some("openai/gpt-5".to_string());
+        let response = settings_response(&settings);
+        assert!(response.has_github_token);
+        assert_eq!(
+            response.default_explain_model.as_deref(),
+            Some("openai/gpt-5")
+        );
     }
 
     #[test]

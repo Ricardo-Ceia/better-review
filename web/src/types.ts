@@ -47,6 +47,7 @@ export interface ReviewStateResponse {
 
 export interface SettingsResponse {
   has_github_token: boolean;
+  default_explain_model: string | null;
 }
 
 export interface ActionResponse {

@@ -18,6 +18,7 @@ let explainModels: ExplainModelsResponse = initialExplainModels;
 let explainHistory: ExplainHistoryResponse = initialExplainHistory;
 let eventSource: EventSource | null = null;
 let activeExplainRunId: number | null = null;
+let modelPickerMode: 'session' | 'default' = 'session';
 
     const iconFor = (file: FileResponse) => {
       if (file.is_binary) return '◈';
@@ -150,8 +151,13 @@ let activeExplainRunId: number | null = null;
       setStatus(result.message || message);
     }
 
+    function defaultExplainModelLabel() {
+      return settings.default_explain_model || 'Auto';
+    }
+
     function renderSettingsStatus() {
       byId('githubTokenStatus').textContent = settings.has_github_token ? 'GitHub token is saved.' : 'GitHub token is not set.';
+      byId('defaultExplainModelStatus').textContent = `Default Explain model is ${defaultExplainModelLabel()}.`;
     }
 
     async function openSettings() {
@@ -252,11 +258,23 @@ let activeExplainRunId: number | null = null;
     }
 
     async function openModelPicker() {
+      modelPickerMode = 'session';
       explainModels = await request<ExplainModelsResponse>('/api/explain/models');
       renderExplainModel();
       renderModelList();
       byId('modelDialog').showModal();
       setStatus('Choose an Explain model.');
+    }
+
+    async function openDefaultModelPicker() {
+      modelPickerMode = 'default';
+      settings = await request<SettingsResponse>('/api/settings');
+      explainModels = await request<ExplainModelsResponse>('/api/explain/models');
+      renderSettingsStatus();
+      renderModelList();
+      byId('settingsDialog').close();
+      byId('modelDialog').showModal();
+      setStatus('Choose the default Explain model.');
     }
 
     function renderModelList() {
@@ -267,22 +285,36 @@ let activeExplainRunId: number | null = null;
         status.textContent = 'Explain is unavailable because opencode is not ready.';
         return;
       }
-      status.textContent = 'Choose Auto or a specific opencode model.';
+      status.textContent = modelPickerMode === 'default' ? 'Choose Auto or a persistent default opencode model.' : 'Choose Auto or a specific opencode model.';
       renderModelRow(list, null, 'Auto');
       explainModels.models.forEach((model) => renderModelRow(list, model, model));
     }
 
     function renderModelRow(list, model, label) {
       const row = document.createElement('li');
-      row.className = `session-item ${model === explainModels.selected_model ? 'selected' : ''}`;
+      const selectedModel = modelPickerMode === 'default' ? settings.default_explain_model : explainModels.selected_model;
+      row.className = `session-item ${model === selectedModel ? 'selected' : ''}`;
       row.innerHTML = '<strong></strong><span class="muted"></span>';
       query(row, 'strong').textContent = label;
-      query(row, '.muted').textContent = model ? 'Explicit model' : 'Use saved/session default when available';
+      query(row, '.muted').textContent = model ? 'Explicit model' : modelPickerMode === 'default' ? 'Use Auto by default' : 'Use saved/session default when available';
       row.addEventListener('click', () => selectExplainModel(model).catch(showError));
       list.appendChild(row);
     }
 
     async function selectExplainModel(model) {
+      if (modelPickerMode === 'default') {
+        settings = await request<SettingsResponse>('/api/settings/default-explain-model', {
+          method: 'POST',
+          body: JSON.stringify({ model }),
+        });
+        renderSettingsStatus();
+        renderModelList();
+        byId('modelDialog').close();
+        byId('settingsDialog').showModal();
+        setStatus(`Default Explain model set to ${defaultExplainModelLabel()}.`);
+        return;
+      }
+
       explainModels = await request<ExplainModelsResponse>('/api/explain/model', {
         method: 'POST',
         body: JSON.stringify({ model }),
@@ -628,6 +660,7 @@ let activeExplainRunId: number | null = null;
     byId('openCommit').addEventListener('click', () => byId('commitDialog').showModal());
     byId('publishCurrent').addEventListener('click', () => byId('publishDialog').showModal());
     byId('submitPublish').addEventListener('click', (event) => { event.preventDefault(); publishCurrentBranch().catch(showError); });
+    byId('chooseDefaultExplainModel').addEventListener('click', (event) => { event.preventDefault(); openDefaultModelPicker().catch(showError); });
     byId('saveGithubToken').addEventListener('click', (event) => { event.preventDefault(); saveGithubToken().catch(showError); });
     byId('paletteInput').addEventListener('input', () => { paletteCursor = 0; renderCommandPalette(); });
     byId('paletteInput').addEventListener('keydown', (event) => {
