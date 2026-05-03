@@ -4,8 +4,7 @@ import { byId, query, queryAll } from './dom';
 import { initialExplainHistory, initialExplainModels, initialExplainSessions, initialFocus, initialScreen, initialSettings } from './state';
 import type { ActionResponse, CommandItem, DiffLine, DiffLineKind, ExplainHistoryItem, ExplainHistoryResponse, ExplainModelsResponse, ExplainSessionsResponse, ExplainStartResponse, FileResponse, FocusTarget, HunkResponse, ReviewStateResponse, ReviewStatus, Screen, SettingsResponse, WebEventPayload } from './types';
 
-const token = new URLSearchParams(location.search).get('token');
-const api = new ApiClient(token);
+const api = new ApiClient();
 let state: ReviewStateResponse | null = null;
 let selectedFile = 0;
 let selectedHunk = 0;
@@ -105,7 +104,7 @@ let modelPickerMode: 'session' | 'default' = 'session';
 
     function connectEvents() {
       if (eventSource) eventSource.close();
-      eventSource = new EventSource(`/api/events?token=${encodeURIComponent(token || '')}`);
+      eventSource = new EventSource('/api/events');
       eventSource.addEventListener('publish_started', (event) => handleServerEvent(event));
       eventSource.addEventListener('publish_finished', (event) => handleServerEvent(event));
       eventSource.addEventListener('publish_failed', (event) => handleServerEvent(event));

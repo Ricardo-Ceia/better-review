@@ -1,9 +1,7 @@
 export class ApiClient {
-  constructor(private readonly token: string | null) {}
-
   async request<T = unknown>(path: string, options: RequestInit = {}): Promise<T> {
-    const separator = path.includes('?') ? '&' : '?';
-    const response = await fetch(`${path}${separator}token=${encodeURIComponent(this.token || '')}`, {
+    const response = await fetch(path, {
+      credentials: 'same-origin',
       headers: { 'content-type': 'application/json', ...(options.headers || {}) },
       ...options,
     });

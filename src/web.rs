@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rand::RngCore;
@@ -25,6 +25,8 @@ use crate::services::opencode::{
     why_target_for_hunk,
 };
 use crate::settings::{AppSettings, SettingsStore, ThemePreset};
+
+const SESSION_COOKIE_NAME: &str = "better_review_session";
 
 pub async fn run() -> Result<()> {
     let repo_path = std::env::current_dir().context("failed to resolve current directory")?;
@@ -302,8 +304,26 @@ struct FileResponse {
     hunks: Vec<Hunk>,
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn index(State(state): State<Arc<WebState>>, Query(auth): Query<AuthQuery>) -> Response {
+    if auth.token.as_deref() == Some(state.token.as_str()) {
+        return (
+            [
+                (header::SET_COOKIE, session_cookie(&state.token)),
+                (header::CACHE_CONTROL, "no-store".to_string()),
+            ],
+            Redirect::to("/"),
+        )
+            .into_response();
+    }
+
+    (
+        [
+            (header::CACHE_CONTROL, "no-store".to_string()),
+            (header::X_FRAME_OPTIONS, "DENY".to_string()),
+        ],
+        Html(INDEX_HTML),
+    )
+        .into_response()
 }
 
 async fn web_js() -> impl IntoResponse {
@@ -317,8 +337,9 @@ async fn web_css() -> impl IntoResponse {
 async fn api_state(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ReviewStateResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let review = state.review.lock().await;
     Ok(Json(review_state_response(&state.repo_path, &review)))
 }
@@ -326,8 +347,9 @@ async fn api_state(
 async fn api_events(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let stream = BroadcastStream::new(state.events.subscribe()).filter_map(|event| {
         event.ok().map(|event| {
             let payload = serde_json::to_string(&event)
@@ -341,8 +363,9 @@ async fn api_events(
 async fn api_refresh(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let _operation = state.operation.lock().await;
     let (_, files) = state.git.collect_diff().await?;
     let mut review = state.review.lock().await;
@@ -358,8 +381,9 @@ async fn api_refresh(
 async fn api_settings(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<SettingsResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let settings = state.settings.lock().await;
     Ok(Json(settings_response(&settings)))
 }
@@ -367,9 +391,10 @@ async fn api_settings(
 async fn api_save_github_token(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     Json(payload): Json<GitHubTokenRequest>,
 ) -> Result<Json<SettingsResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let mut settings = state.settings.lock().await;
     let token = payload.token.trim().to_string();
     settings.github.token = if token.is_empty() { None } else { Some(token) };
@@ -380,9 +405,10 @@ async fn api_save_github_token(
 async fn api_save_theme(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     Json(payload): Json<ThemeRequest>,
 ) -> Result<Json<SettingsResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let mut settings = state.settings.lock().await;
     settings.theme = payload.theme;
     state.settings_store.save(&settings)?;
@@ -392,9 +418,10 @@ async fn api_save_theme(
 async fn api_save_default_explain_model(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     Json(payload): Json<ExplainModelRequest>,
 ) -> Result<Json<SettingsResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     if let Some(model) = &payload.model {
         refresh_explain_models(&state).await;
         let explain = state.explain.lock().await;
@@ -412,8 +439,9 @@ async fn api_save_default_explain_model(
 async fn api_explain_sessions(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ExplainSessionsResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     refresh_explain_sessions(&state).await;
     let explain = state.explain.lock().await;
     Ok(Json(explain_sessions_response(&state, &explain)))
@@ -422,9 +450,10 @@ async fn api_explain_sessions(
 async fn api_select_explain_session(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     Json(payload): Json<ExplainSessionRequest>,
 ) -> Result<Json<ExplainSessionsResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     refresh_explain_sessions(&state).await;
     let mut explain = state.explain.lock().await;
     match payload.session_id {
@@ -446,8 +475,9 @@ async fn api_select_explain_session(
 async fn api_explain_models(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ExplainModelsResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     refresh_explain_models(&state).await;
     let explain = state.explain.lock().await;
     Ok(Json(explain_models_response(&state, &explain)))
@@ -456,9 +486,10 @@ async fn api_explain_models(
 async fn api_select_explain_model(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     Json(payload): Json<ExplainModelRequest>,
 ) -> Result<Json<ExplainModelsResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     refresh_explain_models(&state).await;
     let mut explain = state.explain.lock().await;
     match payload.model {
@@ -476,8 +507,9 @@ async fn api_select_explain_model(
 async fn api_explain_history(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ExplainHistoryResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let explain = state.explain.lock().await;
     Ok(Json(ExplainHistoryResponse {
         runs: explain.history.clone(),
@@ -487,9 +519,10 @@ async fn api_explain_history(
 async fn api_request_explain(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     Json(payload): Json<ExplainRequest>,
 ) -> Result<Json<ExplainStartResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
 
     let target = {
         let review = state.review.lock().await;
@@ -530,9 +563,10 @@ async fn api_request_explain(
 async fn api_retry_explain_run(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     AxumPath(run_id): AxumPath<u64>,
 ) -> Result<Json<ExplainStartResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let (target, session_id, requested_model, model_label) = {
         let explain = state.explain.lock().await;
         let run = explain
@@ -567,9 +601,10 @@ async fn api_retry_explain_run(
 async fn api_cancel_explain_run(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     AxumPath(run_id): AxumPath<u64>,
 ) -> Result<Json<ExplainHistoryResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let mut explain = state.explain.lock().await;
     let run = explain
         .history
@@ -685,9 +720,10 @@ async fn start_web_explain_run(
 async fn api_accept_file(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     AxumPath(file_index): AxumPath<usize>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let _operation = state.operation.lock().await;
     let mut file = clone_review_file_for_mutation(&state, file_index, auth.state_version).await?;
     state.git.accept_file(&mut file).await?;
@@ -704,9 +740,10 @@ async fn api_accept_file(
 async fn api_reject_file(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     AxumPath(file_index): AxumPath<usize>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let _operation = state.operation.lock().await;
     let mut file = clone_review_file_for_mutation(&state, file_index, auth.state_version).await?;
     state.git.reject_file_in_place(&mut file).await?;
@@ -723,9 +760,10 @@ async fn api_reject_file(
 async fn api_unreview_file(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     AxumPath(file_index): AxumPath<usize>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let _operation = state.operation.lock().await;
     let mut file = clone_review_file_for_mutation(&state, file_index, auth.state_version).await?;
     state.git.unstage_file_in_place(&mut file).await?;
@@ -742,9 +780,10 @@ async fn api_unreview_file(
 async fn api_accept_hunk(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     AxumPath((file_index, hunk_index)): AxumPath<(usize, usize)>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let _operation = state.operation.lock().await;
     update_hunk_review_status(
         &state,
@@ -761,9 +800,10 @@ async fn api_accept_hunk(
 async fn api_reject_hunk(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     AxumPath((file_index, hunk_index)): AxumPath<(usize, usize)>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let _operation = state.operation.lock().await;
     update_hunk_review_status(
         &state,
@@ -780,9 +820,10 @@ async fn api_reject_hunk(
 async fn api_commit(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
     Json(payload): Json<CommitRequest>,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     let message = payload.message.trim();
     if message.is_empty() {
         return Err(ApiError::bad_request("write a commit message first"));
@@ -818,8 +859,9 @@ async fn api_commit(
 async fn api_push(
     State(state): State<Arc<WebState>>,
     Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ActionResponse>, ApiError> {
-    ensure_authorized(&state, &auth)?;
+    ensure_authorized(&state, &auth, &headers)?;
     emit_event(
         &state,
         "publish_started",
@@ -858,14 +900,32 @@ fn emit_event(state: &WebState, kind: &str, message: impl Into<String>, run_id: 
     });
 }
 
-fn ensure_authorized(state: &WebState, auth: &AuthQuery) -> Result<(), ApiError> {
-    if auth.token.as_deref() == Some(state.token.as_str()) {
+fn ensure_authorized(
+    state: &WebState,
+    auth: &AuthQuery,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    if auth.token.as_deref() == Some(state.token.as_str())
+        || cookie_value(headers, SESSION_COOKIE_NAME) == Some(state.token.as_str())
+    {
         Ok(())
     } else {
         Err(ApiError::unauthorized(
             "missing or invalid local session token",
         ))
     }
+}
+
+fn session_cookie(token: &str) -> String {
+    format!("{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400")
+}
+
+fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookies.split(';').find_map(|cookie| {
+        let (cookie_name, value) = cookie.trim().split_once('=')?;
+        (cookie_name == name).then_some(value)
+    })
 }
 
 fn ensure_fresh_review_version(
@@ -1229,6 +1289,24 @@ mod tests {
         let response = review_state_response(std::path::Path::new("/repo"), &review);
 
         assert_eq!(response.version, 7);
+    }
+
+    #[test]
+    fn session_cookie_auth_reads_cookie_header() {
+        let cookie = session_cookie("secret");
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "other=value; better_review_session=secret; theme=dark"
+                .parse()
+                .expect("valid cookie header"),
+        );
+
+        assert_eq!(cookie_value(&headers, SESSION_COOKIE_NAME), Some("secret"));
+        assert_eq!(cookie_value(&headers, "missing"), None);
     }
 
     #[test]
