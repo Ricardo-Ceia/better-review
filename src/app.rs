@@ -1,4 +1,5 @@
 mod command_palette;
+mod commit_prompt;
 mod explain_history;
 mod explain_render;
 mod github_token;
@@ -29,7 +30,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::widgets::Widget;
 use ratatui_interact::components::{AnimatedText, AnimatedTextState, AnimatedTextStyle};
@@ -59,6 +60,7 @@ use self::command_palette::{
     CommandPaletteUiState, draw_command_palette, handle_command_palette_key,
     is_command_palette_key, open_command_palette,
 };
+use self::commit_prompt::{draw_commit_prompt, handle_commit_prompt_key, open_commit_prompt};
 use self::explain_history::{
     ExplainRun, ExplainRunStatus, cancel_current_explain, find_explain_run_index_by_id,
     find_reusable_explain_run_index, handle_explain_history_key, next_explain_run_id,
@@ -335,13 +337,6 @@ impl App {
         count_review_statuses(&self.review.files)
     }
 
-    fn open_commit_prompt(&mut self) -> TextArea<'static> {
-        self.overlay = Overlay::CommitPrompt;
-        self.status = "Write a commit message for the accepted changes.".to_string();
-
-        new_commit_message_input()
-    }
-
     fn active_session(&self) -> Option<&OpencodeSession> {
         self.session_state
             .selected
@@ -432,38 +427,6 @@ fn current_brand_icon(animation: &AnimatedTextState) -> &'static str {
     } else {
         BRAND_ICON_ALT
     }
-}
-
-async fn submit_commit_message(
-    app: &mut App,
-    commit_message: &mut TextArea<'static>,
-) -> Result<()> {
-    let message = commit_message.lines().join("\n").trim().to_string();
-    if message.is_empty() {
-        app.status = "Write a commit message first.".to_string();
-        return Ok(());
-    }
-
-    if !app.git.has_staged_changes().await? {
-        app.status = "No accepted changes are staged yet.".to_string();
-        return Ok(());
-    }
-
-    if app.had_staged_changes_on_open {
-        app.status =
-            "Cannot commit from better-review because the app opened with unrelated staged changes."
-                .to_string();
-        return Ok(());
-    }
-
-    app.git.commit_staged(&message).await?;
-    refresh_review_files(app).await?;
-    app.overlay = Overlay::PublishPrompt;
-    app.publish_cursor = 0;
-    app.status = "Committed accepted changes. Publish when ready.".to_string();
-    *commit_message = new_commit_message_input();
-
-    Ok(())
 }
 
 async fn refresh_review_files(app: &mut App) -> Result<()> {
@@ -625,18 +588,9 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
             }
 
             match app.overlay {
-                Overlay::CommitPrompt => match key.code {
-                    KeyCode::Esc => {
-                        app.overlay = Overlay::None;
-                        app.status = "Commit cancelled. Review remains active.".to_string();
-                    }
-                    KeyCode::Enter => {
-                        submit_commit_message(&mut app, &mut commit_message).await?;
-                    }
-                    _ => {
-                        commit_message.input(to_textarea_input(key));
-                    }
-                },
+                Overlay::CommitPrompt => {
+                    handle_commit_prompt_key(&mut app, key, &mut commit_message).await?
+                }
                 Overlay::GitHubTokenPrompt => handle_github_token_prompt_key(&mut app, key),
                 Overlay::PublishPrompt => handle_publish_prompt_key(&mut app, key),
                 Overlay::CommandPalette => {
@@ -683,7 +637,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                             app.status =
                                 "Wait for the current review update to finish.".to_string();
                         } else {
-                            commit_message = app.open_commit_prompt();
+                            commit_message = open_commit_prompt(&mut app);
                         }
                         continue;
                     }
@@ -2474,61 +2428,6 @@ fn diff_scroll_offset(app: &App, area: Rect, diff_lines: &[Line<'_>]) -> u16 {
     preferred_top.min(max_scroll).min(u16::MAX as usize) as u16
 }
 
-fn draw_commit_prompt(
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    app: &App,
-    commit_message: &TextArea<'_>,
-) {
-    let modal = centered_rect(60, 35, area);
-    frame.render_widget(Clear, modal);
-    let inner = modal.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    let lines = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(5),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    let counts = app.review_counts();
-    let block = Block::default()
-        .title("Commit Accepted Changes")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(styles::border_muted()))
-        .style(Style::default().bg(styles::surface_raised()));
-    frame.render_widget(block, modal);
-    frame.render_widget(
-        Paragraph::new(format!(
-            "Accepted {}  |  Rejected {}  |  Unreviewed {}",
-            counts.accepted, counts.rejected, counts.unreviewed
-        ))
-        .style(styles::title()),
-        lines[0],
-    );
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(vec![
-            Span::raw("Commit prompt active  |  "),
-            Span::styled("Enter", styles::keybind()),
-            Span::raw(" commit  |  "),
-            Span::styled("Esc", styles::keybind()),
-            Span::raw(" close"),
-        ])])
-        .style(styles::muted()),
-        lines[1],
-    );
-    frame.render_widget(commit_message, lines[2]);
-    frame.render_widget(
-        Paragraph::new("Only accepted staged changes are committed.").style(styles::muted()),
-        lines[3],
-    );
-}
-
 fn render_brand_lockup(frame: &mut ratatui::Frame, area: Rect, app: &App, alignment: Alignment) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -2726,7 +2625,7 @@ mod tests {
             } else if app.review_busy {
                 app.status = "Wait for the current review update to finish.".to_string();
             } else {
-                let _ = app.open_commit_prompt();
+                let _ = open_commit_prompt(&mut app);
             }
         }
 

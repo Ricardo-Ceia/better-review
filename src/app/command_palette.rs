@@ -10,7 +10,7 @@ use crate::ui::styles;
 
 use super::{
     App, KeybindingCommand, Overlay, ReviewFocus, Screen, centered_rect, handle_review_key,
-    key_for, key_label, open_explain_menu, open_settings, open_theme_picker,
+    key_for, key_label, open_commit_prompt, open_explain_menu, open_settings, open_theme_picker,
     refresh_review_files_for_user, sync_cursor_line_to_hunk,
 };
 
@@ -278,7 +278,7 @@ pub(super) async fn execute_command_palette_action(
             } else if app.review_busy {
                 app.status = "Wait for the current review update to finish.".to_string();
             } else {
-                *commit_message = app.open_commit_prompt();
+                *commit_message = open_commit_prompt(app);
             }
         }
         CommandPaletteAction::Settings => open_settings(app),
