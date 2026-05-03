@@ -9,6 +9,7 @@ mod keybindings;
 mod model_picker;
 mod publish;
 mod review_display;
+mod review_mutation;
 mod review_nav;
 mod session_picker;
 mod settings_panel;
@@ -108,6 +109,10 @@ use self::review_display::{
 use self::review_display::{
     diff_change_bar, diff_change_bar_style, diff_current_line_bg, diff_marker_style, diff_row_bg,
     line_number_style,
+};
+use self::review_mutation::{
+    accept_review_selection, handle_hunk_sync_result, reject_review_selection,
+    unreview_current_file,
 };
 use self::review_nav::{
     ReviewFocus, ReviewUiState, current_why_target, move_review_cursor_by_line,
@@ -484,22 +489,14 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> 
                     updated_file,
                     success_status,
                     result,
-                } => {
-                    app.review_busy = false;
-                    if let Some(file) = app.review.files.get_mut(file_index) {
-                        match result {
-                            Ok(()) => {
-                                *file = updated_file;
-                                sync_cursor_line_to_hunk(&mut app.review);
-                                app.status = success_status;
-                            }
-                            Err(err) => {
-                                *file = original_file;
-                                app.status = err;
-                            }
-                        }
-                    }
-                }
+                } => handle_hunk_sync_result(
+                    &mut app,
+                    file_index,
+                    original_file,
+                    updated_file,
+                    success_status,
+                    result,
+                ),
                 Message::WhyThis {
                     job_id,
                     cache_key,
@@ -699,90 +696,13 @@ async fn handle_review_key(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
         _ if key_matches(app, key, KeybindingCommand::Accept) => {
-            if app.review.focus == ReviewFocus::Files {
-                if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                    match app.git.accept_file(file).await {
-                        Ok(()) => app.status = "Accepted file changes.".to_string(),
-                        Err(err) => app.status = format!("Could not accept file: {err}"),
-                    }
-                }
-            } else if let Some(file) = app.review.files.get_mut(app.review.cursor_file)
-                && file.hunks.get(app.review.cursor_hunk).is_some()
-            {
-                let file_index = app.review.cursor_file;
-                let original_file = file.clone();
-                let mut updated_file = file.clone();
-                updated_file.hunks[app.review.cursor_hunk].review_status = ReviewStatus::Accepted;
-                updated_file.sync_review_status();
-
-                let tx = app.tx.clone();
-                let git = app.git.clone();
-                app.review_busy = true;
-                app.status = "Applying accepted hunk...".to_string();
-
-                tokio::spawn(async move {
-                    let result = git
-                        .sync_file_hunks_to_index(&updated_file)
-                        .await
-                        .map_err(|err| format!("Could not accept hunk: {err}"));
-                    let _ = tx.send(Message::HunkSync {
-                        file_index,
-                        original_file,
-                        updated_file,
-                        success_status: "Accepted hunk.".to_string(),
-                        result,
-                    });
-                });
-            }
+            accept_review_selection(app).await;
         }
         _ if key_matches(app, key, KeybindingCommand::Reject) => {
-            if app.review.focus == ReviewFocus::Files {
-                if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                    let result = app.git.reject_file_in_place(file).await;
-
-                    match result {
-                        Ok(()) => app.status = "Rejected file changes.".to_string(),
-                        Err(err) => app.status = format!("Could not reject file: {err}"),
-                    }
-                }
-            } else if let Some(file) = app.review.files.get_mut(app.review.cursor_file)
-                && file.hunks.get(app.review.cursor_hunk).is_some()
-            {
-                let file_index = app.review.cursor_file;
-                let original_file = file.clone();
-                let mut updated_file = file.clone();
-                updated_file.hunks[app.review.cursor_hunk].review_status = ReviewStatus::Rejected;
-                updated_file.sync_review_status();
-
-                let tx = app.tx.clone();
-                let git = app.git.clone();
-                app.review_busy = true;
-                app.status = "Rejecting hunk...".to_string();
-
-                tokio::spawn(async move {
-                    let result = git
-                        .sync_file_hunks_to_index(&updated_file)
-                        .await
-                        .map_err(|err| format!("Could not reject hunk: {err}"));
-                    let _ = tx.send(Message::HunkSync {
-                        file_index,
-                        original_file,
-                        updated_file,
-                        success_status: "Rejected hunk.".to_string(),
-                        result,
-                    });
-                });
-            }
+            reject_review_selection(app).await;
         }
         _ if key_matches(app, key, KeybindingCommand::Unreview) => {
-            if let Some(file) = app.review.files.get_mut(app.review.cursor_file) {
-                let result = app.git.unstage_file_in_place(file).await;
-
-                match result {
-                    Ok(()) => app.status = "Moved file back to unreviewed.".to_string(),
-                    Err(err) => app.status = format!("Could not unstage file: {err}"),
-                }
-            }
+            unreview_current_file(app).await;
         }
         _ if key_matches(app, key, KeybindingCommand::Settings) => open_settings(app),
         _ if key_matches(app, key, KeybindingCommand::Explain) => open_explain_menu(app),
