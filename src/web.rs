@@ -24,7 +24,7 @@ use crate::services::opencode::{
     OpencodeService, OpencodeSession, WhyAnswer, WhyTarget, why_target_for_file,
     why_target_for_hunk,
 };
-use crate::settings::{AppSettings, SettingsStore};
+use crate::settings::{AppSettings, SettingsStore, ThemePreset};
 
 pub async fn run() -> Result<()> {
     let repo_path = std::env::current_dir().context("failed to resolve current directory")?;
@@ -74,6 +74,7 @@ pub async fn run() -> Result<()> {
         .route("/api/refresh", post(api_refresh))
         .route("/api/settings", get(api_settings))
         .route("/api/settings/github-token", post(api_save_github_token))
+        .route("/api/settings/theme", post(api_save_theme))
         .route(
             "/api/settings/default-explain-model",
             post(api_save_default_explain_model),
@@ -182,6 +183,11 @@ struct GitHubTokenRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct ThemeRequest {
+    theme: ThemePreset,
+}
+
+#[derive(Debug, Deserialize)]
 struct ExplainSessionRequest {
     session_id: Option<String>,
 }
@@ -267,6 +273,15 @@ struct WebEvent {
 struct SettingsResponse {
     has_github_token: bool,
     default_explain_model: Option<String>,
+    theme: String,
+    theme_label: String,
+    themes: Vec<ThemeResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThemeResponse {
+    value: String,
+    label: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -358,6 +373,18 @@ async fn api_save_github_token(
     let mut settings = state.settings.lock().await;
     let token = payload.token.trim().to_string();
     settings.github.token = if token.is_empty() { None } else { Some(token) };
+    state.settings_store.save(&settings)?;
+    Ok(Json(settings_response(&settings)))
+}
+
+async fn api_save_theme(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+    Json(payload): Json<ThemeRequest>,
+) -> Result<Json<SettingsResponse>, ApiError> {
+    ensure_authorized(&state, &auth)?;
+    let mut settings = state.settings.lock().await;
+    settings.theme = payload.theme;
     state.settings_store.save(&settings)?;
     Ok(Json(settings_response(&settings)))
 }
@@ -923,6 +950,25 @@ fn settings_response(settings: &AppSettings) -> SettingsResponse {
     SettingsResponse {
         has_github_token: settings.github.token.is_some(),
         default_explain_model: settings.explain.default_model.clone(),
+        theme: theme_value(settings.theme).to_string(),
+        theme_label: settings.theme.label().to_string(),
+        themes: ThemePreset::ALL
+            .into_iter()
+            .map(|theme| ThemeResponse {
+                value: theme_value(theme).to_string(),
+                label: theme.label().to_string(),
+            })
+            .collect(),
+    }
+}
+
+fn theme_value(theme: ThemePreset) -> &'static str {
+    match theme {
+        ThemePreset::Default => "default",
+        ThemePreset::OneDarkPro => "one_dark_pro",
+        ThemePreset::Dracula => "dracula",
+        ThemePreset::TokyoNight => "tokyo_night",
+        ThemePreset::NightOwl => "night_owl",
     }
 }
 
@@ -1303,15 +1349,20 @@ mod tests {
         let response = settings_response(&settings);
         assert!(!response.has_github_token);
         assert_eq!(response.default_explain_model, None);
+        assert_eq!(response.theme, "default");
+        assert_eq!(response.themes.len(), ThemePreset::ALL.len());
 
         settings.github.token = Some("secret-token".to_string());
         settings.explain.default_model = Some("openai/gpt-5".to_string());
+        settings.theme = ThemePreset::Dracula;
         let response = settings_response(&settings);
         assert!(response.has_github_token);
         assert_eq!(
             response.default_explain_model.as_deref(),
             Some("openai/gpt-5")
         );
+        assert_eq!(response.theme, "dracula");
+        assert_eq!(response.theme_label, "Dracula");
     }
 
     #[test]

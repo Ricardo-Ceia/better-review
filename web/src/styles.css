@@ -17,9 +17,13 @@
       --code-remove: #3f1018;
       --code-focus: #1e3a8a;
     }
+    body[data-theme="one_dark_pro"] { --bg: #21252b; --surface: #282c34; --surface-raised: #2c313c; --panel: #282c34; --border: #3e4451; --muted: #828997; --text: #abb2bf; --accent: #61afef; --accent-dim: #3a4556; --green: #98c379; --red: #e06c75; --yellow: #e5c07b; --code-add: #1e3a2f; --code-remove: #3e2529; --code-focus: #3a4556; }
+    body[data-theme="dracula"] { --bg: #21222c; --surface: #282a36; --surface-raised: #44475a; --panel: #282a36; --border: #6272a4; --muted: #98a0c5; --text: #f8f8f2; --accent: #bd93f9; --accent-dim: #44475a; --green: #50fa7b; --red: #ff5555; --yellow: #f1fa8c; --code-add: #243d35; --code-remove: #4b2b35; --code-focus: #44475a; }
+    body[data-theme="tokyo_night"] { --bg: #16161e; --surface: #1a1b26; --surface-raised: #24283b; --panel: #1a1b26; --border: #3b4261; --muted: #a9b1d6; --text: #c0caf5; --accent: #7aa2f7; --accent-dim: #2e3c64; --green: #9ece6a; --red: #f7768e; --yellow: #e0af68; --code-add: #203d31; --code-remove: #402933; --code-focus: #2e3c64; }
+    body[data-theme="night_owl"] { --bg: #010c16; --surface: #011627; --surface-raised: #0b253a; --panel: #011627; --border: #5f7e97; --muted: #c5d3e3; --text: #d6deeb; --accent: #82aaff; --accent-dim: #1d3b53; --green: #addb67; --red: #ef5350; --yellow: #ecc48d; --code-add: #123524; --code-remove: #3a1f2a; --code-focus: #1d3b53; }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top, #172554 0, var(--bg) 38%); color: var(--text); }
-    button, textarea { font: inherit; }
+    button, textarea, select { font: inherit; }
     button { cursor: pointer; border: 1px solid #334155; color: var(--text); background: #1e293b; padding: 7px 10px; border-radius: 10px; }
     button:hover { background: #334155; }
     button.primary { border-color: #2563eb; background: #1d4ed8; }
@@ -81,7 +85,8 @@
     .footer-path { color: #bfdbfe; font-weight: 800; }
     .keybar { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); }
     .key { color: var(--text); background: #0f172a; border: 1px solid #334155; border-radius: 7px; padding: 2px 6px; }
-    textarea { width: 100%; min-height: 104px; border-radius: 12px; border: 1px solid #334155; background: #020617; color: var(--text); padding: 12px; }
+    textarea, select { width: 100%; border-radius: 12px; border: 1px solid var(--border); background: var(--panel); color: var(--text); padding: 12px; }
+    textarea { min-height: 104px; }
     dialog { border: 1px solid #334155; border-radius: 18px; background: #111827; color: var(--text); max-width: 560px; width: calc(100% - 40px); }
     dialog::backdrop { background: rgb(0 0 0 / 0.62); }
     .palette-dialog { padding: 0; overflow: hidden; }

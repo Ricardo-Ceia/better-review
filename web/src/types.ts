@@ -45,9 +45,17 @@ export interface ReviewStateResponse {
   files: FileResponse[];
 }
 
+export interface ThemeResponse {
+  value: string;
+  label: string;
+}
+
 export interface SettingsResponse {
   has_github_token: boolean;
   default_explain_model: string | null;
+  theme: string;
+  theme_label: string;
+  themes: ThemeResponse[];
 }
 
 export interface ActionResponse {

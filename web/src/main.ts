@@ -158,9 +158,37 @@ let modelPickerMode: 'session' | 'default' = 'session';
       return settings.default_explain_model || 'Auto';
     }
 
+    function applyTheme() {
+      document.body.dataset.theme = settings.theme;
+    }
+
+    function renderThemeSelect() {
+      const select = byId<HTMLSelectElement>('themeSelect');
+      select.innerHTML = '';
+      settings.themes.forEach((theme) => {
+        const option = document.createElement('option');
+        option.value = theme.value;
+        option.textContent = theme.label;
+        option.selected = theme.value === settings.theme;
+        select.appendChild(option);
+      });
+    }
+
     function renderSettingsStatus() {
+      applyTheme();
+      renderThemeSelect();
+      byId('themeStatus').textContent = `Theme is ${settings.theme_label}.`;
       byId('githubTokenStatus').textContent = settings.has_github_token ? 'GitHub token is saved.' : 'GitHub token is not set.';
       byId('defaultExplainModelStatus').textContent = `Default Explain model is ${defaultExplainModelLabel()}.`;
+    }
+
+    async function saveTheme(theme: string) {
+      settings = await request<SettingsResponse>('/api/settings/theme', {
+        method: 'POST',
+        body: JSON.stringify({ theme }),
+      });
+      renderSettingsStatus();
+      setStatus(`Theme set to ${settings.theme_label}.`);
     }
 
     async function openSettings() {
@@ -698,6 +726,7 @@ let modelPickerMode: 'session' | 'default' = 'session';
     byId('openCommit').addEventListener('click', () => byId('commitDialog').showModal());
     byId('publishCurrent').addEventListener('click', () => byId('publishDialog').showModal());
     byId('submitPublish').addEventListener('click', (event) => { event.preventDefault(); publishCurrentBranch().catch(showError); });
+    byId('themeSelect').addEventListener('change', (event) => saveTheme((event.target as HTMLSelectElement).value).catch(showError));
     byId('chooseDefaultExplainModel').addEventListener('click', (event) => { event.preventDefault(); openDefaultModelPicker().catch(showError); });
     byId('saveGithubToken').addEventListener('click', (event) => { event.preventDefault(); saveGithubToken().catch(showError); });
     byId('paletteInput').addEventListener('input', () => { paletteCursor = 0; renderCommandPalette(); });
