@@ -1,3 +1,6 @@
+mod keybindings;
+mod text_input;
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -18,7 +21,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::widgets::Widget;
 use ratatui_interact::components::{AnimatedText, AnimatedTextState, AnimatedTextStyle};
-use ratatui_textarea::{TextArea, WrapMode};
+use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -32,9 +35,20 @@ use crate::services::opencode::{
     OpencodeService, OpencodeSession, WhyAnswer, WhyTarget, why_target_for_file,
     why_target_for_hunk,
 };
-use crate::settings::{AppSettings, KeybindingsSettings, SettingsStore, ThemePreset};
+#[cfg(test)]
+use crate::settings::KeybindingsSettings;
+use crate::settings::{AppSettings, SettingsStore, ThemePreset};
 use crate::ui::review::{ReviewRenderRow, ReviewRenderSideLine, build_review_render_rows};
 use crate::ui::styles::{self, Palette};
+
+use self::keybindings::{
+    command_binding, command_label, is_valid_keybinding_char, key_for, key_matches,
+    key_status_label, keybinding_conflict, selected_keybinding_command, set_command_binding,
+};
+use self::text_input::{
+    new_commit_message_input, new_github_token_input, new_github_token_input_with_value,
+    to_textarea_input,
+};
 
 pub async fn run() -> Result<()> {
     enable_raw_mode()?;
@@ -444,24 +458,6 @@ fn current_brand_icon(animation: &AnimatedTextState) -> &'static str {
     } else {
         BRAND_ICON_ALT
     }
-}
-
-fn new_commit_message_input() -> TextArea<'static> {
-    let mut commit_message = TextArea::default();
-    commit_message.set_placeholder_text("Write the commit message for accepted changes");
-    commit_message.set_wrap_mode(WrapMode::WordOrGlyph);
-    commit_message
-}
-
-fn new_github_token_input() -> TextArea<'static> {
-    new_github_token_input_with_value("")
-}
-
-fn new_github_token_input_with_value(value: &str) -> TextArea<'static> {
-    let mut input = TextArea::new(vec![value.to_string()]);
-    input.set_placeholder_text("Paste a GitHub token with repository write access");
-    input.set_mask_char('*');
-    input
 }
 
 async fn submit_commit_message(
@@ -4148,108 +4144,6 @@ fn saved_model_label(model: &Option<String>) -> String {
     model.clone().unwrap_or_else(|| "Auto".to_string())
 }
 
-fn command_binding(settings: &KeybindingsSettings, command: KeybindingCommand) -> char {
-    command_binding_value(settings, command)
-        .chars()
-        .next()
-        .filter(|ch| is_valid_keybinding_char(*ch))
-        .unwrap_or_else(|| {
-            command_binding_value(&KeybindingsSettings::default(), command)
-                .chars()
-                .next()
-                .expect("default keybinding must not be empty")
-        })
-}
-
-fn command_binding_value(settings: &KeybindingsSettings, command: KeybindingCommand) -> &str {
-    match command {
-        KeybindingCommand::Refresh => &settings.refresh,
-        KeybindingCommand::Commit => &settings.commit,
-        KeybindingCommand::Settings => &settings.settings,
-        KeybindingCommand::Accept => &settings.accept,
-        KeybindingCommand::Reject => &settings.reject,
-        KeybindingCommand::Unreview => &settings.unreview,
-        KeybindingCommand::Explain => &settings.explain,
-        KeybindingCommand::ExplainContext => &settings.explain_context,
-        KeybindingCommand::ExplainModel => &settings.explain_model,
-        KeybindingCommand::ExplainHistory => &settings.explain_history,
-        KeybindingCommand::ExplainRetry => &settings.explain_retry,
-        KeybindingCommand::ExplainCancel => &settings.explain_cancel,
-        KeybindingCommand::MoveDown => &settings.move_down,
-        KeybindingCommand::MoveUp => &settings.move_up,
-    }
-}
-
-fn set_command_binding(settings: &mut KeybindingsSettings, command: KeybindingCommand, key: char) {
-    let key = key.to_string();
-    match command {
-        KeybindingCommand::Refresh => settings.refresh = key,
-        KeybindingCommand::Commit => settings.commit = key,
-        KeybindingCommand::Settings => settings.settings = key,
-        KeybindingCommand::Accept => settings.accept = key,
-        KeybindingCommand::Reject => settings.reject = key,
-        KeybindingCommand::Unreview => settings.unreview = key,
-        KeybindingCommand::Explain => settings.explain = key,
-        KeybindingCommand::ExplainContext => settings.explain_context = key,
-        KeybindingCommand::ExplainModel => settings.explain_model = key,
-        KeybindingCommand::ExplainHistory => settings.explain_history = key,
-        KeybindingCommand::ExplainRetry => settings.explain_retry = key,
-        KeybindingCommand::ExplainCancel => settings.explain_cancel = key,
-        KeybindingCommand::MoveDown => settings.move_down = key,
-        KeybindingCommand::MoveUp => settings.move_up = key,
-    }
-}
-
-fn command_label(command: KeybindingCommand) -> &'static str {
-    match command {
-        KeybindingCommand::Refresh => "Refresh changes",
-        KeybindingCommand::Commit => "Commit accepted",
-        KeybindingCommand::Settings => "Open settings",
-        KeybindingCommand::Accept => "Accept change",
-        KeybindingCommand::Reject => "Reject change",
-        KeybindingCommand::Unreview => "Move to unreviewed",
-        KeybindingCommand::Explain => "Open Explain",
-        KeybindingCommand::ExplainContext => "Choose Explain context",
-        KeybindingCommand::ExplainModel => "Choose Explain model",
-        KeybindingCommand::ExplainHistory => "Open Explain history",
-        KeybindingCommand::ExplainRetry => "Retry Explain",
-        KeybindingCommand::ExplainCancel => "Cancel Explain",
-        KeybindingCommand::MoveDown => "Move down",
-        KeybindingCommand::MoveUp => "Move up",
-    }
-}
-
-fn key_for(app: &App, command: KeybindingCommand) -> char {
-    command_binding(&app.settings.keybindings, command)
-}
-
-fn key_status_label(app: &App, command: KeybindingCommand) -> String {
-    key_label(key_for(app, command))
-}
-
-fn key_matches(app: &App, key: KeyEvent, command: KeybindingCommand) -> bool {
-    key.modifiers == KeyModifiers::NONE && key.code == KeyCode::Char(key_for(app, command))
-}
-
-fn is_valid_keybinding_char(ch: char) -> bool {
-    ch.is_ascii_lowercase()
-}
-
-fn keybinding_conflict(
-    settings: &KeybindingsSettings,
-    command: KeybindingCommand,
-    key: char,
-) -> Option<KeybindingCommand> {
-    KEYBINDING_COMMANDS
-        .iter()
-        .copied()
-        .find(|candidate| *candidate != command && command_binding(settings, *candidate) == key)
-}
-
-fn selected_keybinding_command(app: &App) -> KeybindingCommand {
-    KEYBINDING_COMMANDS[app.keybinding_cursor.min(KEYBINDING_COMMANDS.len() - 1)]
-}
-
 fn selected_publish_action(app: &App) -> PublishAction {
     PUBLISH_ACTIONS[app.publish_cursor.min(PUBLISH_ACTIONS.len() - 1)]
 }
@@ -5254,30 +5148,6 @@ fn render_brand_lockup(frame: &mut ratatui::Frame, area: Rect, app: &App, alignm
                     .wave_width(4),
             )
             .render(word_area, frame.buffer_mut());
-    }
-}
-
-fn to_textarea_input(key: KeyEvent) -> ratatui_textarea::Input {
-    ratatui_textarea::Input {
-        key: match key.code {
-            KeyCode::Backspace => ratatui_textarea::Key::Backspace,
-            KeyCode::Enter => ratatui_textarea::Key::Enter,
-            KeyCode::Left => ratatui_textarea::Key::Left,
-            KeyCode::Right => ratatui_textarea::Key::Right,
-            KeyCode::Up => ratatui_textarea::Key::Up,
-            KeyCode::Down => ratatui_textarea::Key::Down,
-            KeyCode::Home => ratatui_textarea::Key::Home,
-            KeyCode::End => ratatui_textarea::Key::End,
-            KeyCode::PageUp => ratatui_textarea::Key::PageUp,
-            KeyCode::PageDown => ratatui_textarea::Key::PageDown,
-            KeyCode::Delete => ratatui_textarea::Key::Delete,
-            KeyCode::Char(ch) => ratatui_textarea::Key::Char(ch),
-            KeyCode::Tab => ratatui_textarea::Key::Tab,
-            _ => ratatui_textarea::Key::Null,
-        },
-        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
-        alt: key.modifiers.contains(KeyModifiers::ALT),
-        shift: key.modifiers.contains(KeyModifiers::SHIFT),
     }
 }
 
