@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,13 +14,15 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use tokio::sync::{Mutex, broadcast};
+use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::domain::diff::{FileDiff, Hunk, ReviewCounts, ReviewStatus, count_review_statuses};
 use crate::services::git::{GitService, PushFailure};
 use crate::services::opencode::{
-    OpencodeService, OpencodeSession, WhyAnswer, why_target_for_file, why_target_for_hunk,
+    OpencodeService, OpencodeSession, WhyAnswer, WhyTarget, why_target_for_file,
+    why_target_for_hunk,
 };
 use crate::settings::{AppSettings, SettingsStore};
 
@@ -53,6 +56,7 @@ pub async fn run() -> Result<()> {
             selected_model: None,
             history: Vec::new(),
             next_history_id: 1,
+            running: HashMap::new(),
         }),
         review: Mutex::new(WebReviewState {
             files,
@@ -79,6 +83,14 @@ pub async fn run() -> Result<()> {
         .route("/api/explain/models", get(api_explain_models))
         .route("/api/explain/model", post(api_select_explain_model))
         .route("/api/explain/history", get(api_explain_history))
+        .route(
+            "/api/explain/history/:run_id/retry",
+            post(api_retry_explain_run),
+        )
+        .route(
+            "/api/explain/history/:run_id/cancel",
+            post(api_cancel_explain_run),
+        )
         .route("/api/explain", post(api_request_explain))
         .route("/api/commit", post(api_commit))
         .route("/api/push", post(api_push))
@@ -141,6 +153,7 @@ struct WebExplainState {
     selected_model: Option<String>,
     history: Vec<WebExplainHistoryItem>,
     next_history_id: u64,
+    running: HashMap<u64, JoinHandle<()>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,6 +205,12 @@ struct WebExplainHistoryItem {
     status: String,
     answer: Option<WebExplainAnswer>,
     error: Option<String>,
+    #[serde(skip_serializing)]
+    target: Option<WhyTarget>,
+    #[serde(skip_serializing)]
+    context_source_id: Option<String>,
+    #[serde(skip_serializing)]
+    requested_model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -444,11 +463,6 @@ async fn api_request_explain(
     Json(payload): Json<ExplainRequest>,
 ) -> Result<Json<ExplainStartResponse>, ApiError> {
     ensure_authorized(&state, &auth)?;
-    let Some(opencode) = state.opencode.clone() else {
-        return Err(ApiError::bad_request(
-            "Explain is unavailable because opencode is not ready",
-        ));
-    };
 
     let target = {
         let review = state.review.lock().await;
@@ -468,13 +482,107 @@ async fn api_request_explain(
         }
     };
 
+    let (session_id, selected_model) = {
+        let explain = state.explain.lock().await;
+        let session_id = explain
+            .selected_session_id
+            .clone()
+            .ok_or_else(|| ApiError::bad_request("choose an Explain context source first"))?;
+        (session_id, explain.selected_model.clone())
+    };
+    let default_model = state.settings.lock().await.explain.default_model.clone();
+    let model = selected_model.clone().or_else(|| default_model.clone());
+    let model_label = selected_model.clone().unwrap_or_else(|| {
+        default_model.map_or_else(|| "Auto".to_string(), |model| format!("Auto ({model})"))
+    });
+
+    let response = start_web_explain_run(state, target, session_id, model, model_label).await?;
+    Ok(Json(response))
+}
+
+async fn api_retry_explain_run(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+    AxumPath(run_id): AxumPath<u64>,
+) -> Result<Json<ExplainStartResponse>, ApiError> {
+    ensure_authorized(&state, &auth)?;
+    let (target, session_id, requested_model, model_label) = {
+        let explain = state.explain.lock().await;
+        let run = explain
+            .history
+            .iter()
+            .find(|run| run.id == run_id)
+            .ok_or_else(|| ApiError::not_found("Explain run was not found"))?;
+        if run.status == "Running" {
+            return Err(ApiError::conflict("Explain run is already running"));
+        }
+        let target = run
+            .target
+            .clone()
+            .ok_or_else(|| ApiError::bad_request("Explain run cannot be retried"))?;
+        let session_id = run
+            .context_source_id
+            .clone()
+            .ok_or_else(|| ApiError::bad_request("Explain run has no context source"))?;
+        (
+            target,
+            session_id,
+            run.requested_model.clone(),
+            run.model.clone(),
+        )
+    };
+
+    let response =
+        start_web_explain_run(state, target, session_id, requested_model, model_label).await?;
+    Ok(Json(response))
+}
+
+async fn api_cancel_explain_run(
+    State(state): State<Arc<WebState>>,
+    Query(auth): Query<AuthQuery>,
+    AxumPath(run_id): AxumPath<u64>,
+) -> Result<Json<ExplainHistoryResponse>, ApiError> {
+    ensure_authorized(&state, &auth)?;
     let mut explain = state.explain.lock().await;
-    let session_id = explain
-        .selected_session_id
-        .clone()
-        .ok_or_else(|| ApiError::bad_request("choose an Explain context source first"))?;
-    let model = explain.selected_model.clone();
-    let model_label = model.clone().unwrap_or_else(|| "Auto".to_string());
+    let run = explain
+        .history
+        .iter_mut()
+        .find(|run| run.id == run_id)
+        .ok_or_else(|| ApiError::not_found("Explain run was not found"))?;
+    if run.status != "Running" {
+        return Err(ApiError::bad_request("Explain run is not running"));
+    }
+    run.status = "Cancelled".to_string();
+    run.answer = None;
+    run.error = None;
+    if let Some(handle) = explain.running.remove(&run_id) {
+        handle.abort();
+    }
+    let runs = explain.history.clone();
+    drop(explain);
+    emit_event(
+        &state,
+        "explain_cancelled",
+        format!("Cancelled Explain run #{run_id}."),
+        Some(run_id),
+    );
+    Ok(Json(ExplainHistoryResponse { runs }))
+}
+
+async fn start_web_explain_run(
+    state: Arc<WebState>,
+    target: WhyTarget,
+    session_id: String,
+    model: Option<String>,
+    model_label: String,
+) -> Result<ExplainStartResponse, ApiError> {
+    let Some(opencode) = state.opencode.clone() else {
+        return Err(ApiError::bad_request(
+            "Explain is unavailable because opencode is not ready",
+        ));
+    };
+
+    let mut explain = state.explain.lock().await;
     let id = explain.next_history_id;
     explain.next_history_id += 1;
     let label = target.label();
@@ -485,6 +593,9 @@ async fn api_request_explain(
         status: "Running".to_string(),
         answer: None,
         error: None,
+        target: Some(target.clone()),
+        context_source_id: Some(session_id.clone()),
+        requested_model: model.clone(),
     });
     drop(explain);
 
@@ -496,7 +607,7 @@ async fn api_request_explain(
     );
     let state_for_task = state.clone();
     let label_for_task = label.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let result = opencode
             .ask_why(&session_id, &target, model.as_deref())
             .await;
@@ -517,22 +628,31 @@ async fn api_request_explain(
                 )
             }
         };
-        {
+        let completed = {
             let mut explain = state_for_task.explain.lock().await;
-            if let Some(run) = explain.history.iter_mut().find(|run| run.id == id) {
+            let mut completed = false;
+            if let Some(run) = explain.history.iter_mut().find(|run| run.id == id)
+                && run.status == "Running"
+            {
                 run.status = status.to_string();
                 run.answer = answer;
                 run.error = error;
+                completed = true;
             }
+            explain.running.remove(&id);
+            completed
+        };
+        if completed {
+            emit_event(&state_for_task, "explain_finished", message, Some(id));
         }
-        emit_event(&state_for_task, "explain_finished", message, Some(id));
     });
+    state.explain.lock().await.running.insert(id, handle);
 
-    Ok(Json(ExplainStartResponse {
+    Ok(ExplainStartResponse {
         id,
         label,
         status: "Running".to_string(),
-    }))
+    })
 }
 
 async fn api_accept_file(
@@ -1108,6 +1228,7 @@ mod tests {
                 selected_model: None,
                 history: Vec::new(),
                 next_history_id: 1,
+                running: HashMap::new(),
             }),
             review: Mutex::new(WebReviewState {
                 files: Vec::new(),
@@ -1138,8 +1259,12 @@ mod tests {
                     risk_reason: "low risk".to_string(),
                 }),
                 error: None,
+                target: None,
+                context_source_id: None,
+                requested_model: None,
             }],
             next_history_id: 2,
+            running: HashMap::new(),
         };
 
         let response = explain_sessions_response(&state, &explain);

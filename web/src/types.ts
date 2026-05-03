@@ -86,7 +86,7 @@ export interface ExplainHistoryItem {
   id: number;
   label: string;
   model: string;
-  status: 'Running' | 'Ready' | 'Failed' | string;
+  status: 'Running' | 'Ready' | 'Failed' | 'Cancelled' | string;
   answer: ExplainAnswerResponse | null;
   error: string | null;
 }

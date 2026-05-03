@@ -53,6 +53,8 @@ let modelPickerMode: 'session' | 'default' = 'session';
         { label: 'Choose Explain context', detail: 'Select the opencode session used for Explain', shortcut: 'o', enabled: true, run: openSessionPicker },
         { label: 'Choose Explain model', detail: 'Select the model used for Explain', shortcut: 'm', enabled: true, run: openModelPicker },
         { label: 'Open Explain history', detail: 'Show explanations from this browser session', shortcut: 'h', enabled: true, run: openExplainHistory },
+        { label: 'Retry Explain', detail: 'Retry the active Explain run', shortcut: 't', enabled: activeExplainRunId !== null && findExplainRun(activeExplainRunId)?.status !== 'Running', run: retryActiveExplain },
+        { label: 'Cancel Explain', detail: 'Cancel the active running Explain run', shortcut: 'z', enabled: activeExplainRunId !== null && findExplainRun(activeExplainRunId)?.status === 'Running', run: cancelActiveExplain },
         { label: 'Commit accepted changes', detail: 'Write a commit message for accepted changes', shortcut: 'c', enabled: reviewAvailable, run: () => byId('commitDialog').showModal() },
         { label: 'Publish current branch', detail: 'Push the reviewed commit from the current branch', shortcut: 'p', enabled: true, run: () => byId('publishDialog').showModal() },
         { label: 'Open settings', detail: 'Configure GitHub token for HTTPS publishing', shortcut: 's', enabled: true, run: openSettings },
@@ -109,6 +111,7 @@ let modelPickerMode: 'session' | 'default' = 'session';
       eventSource.addEventListener('publish_failed', (event) => handleServerEvent(event));
       eventSource.addEventListener('explain_started', (event) => handleServerEvent(event));
       eventSource.addEventListener('explain_finished', (event) => handleServerEvent(event, true));
+      eventSource.addEventListener('explain_cancelled', (event) => handleServerEvent(event, true));
       eventSource.onerror = () => setStatus('Live updates disconnected. Refresh if actions stop updating.');
     }
 
@@ -383,24 +386,57 @@ let modelPickerMode: 'session' | 'default' = 'session';
       answer.classList.toggle('muted', !run?.answer);
       if (!run) {
         answer.textContent = 'No explanation has been requested yet.';
+        updateExplainActionButtons(null);
         return;
       }
       if (run.status === 'Running') {
         answer.textContent = `Running Explain for ${run.label} with ${run.model}.`;
+        updateExplainActionButtons(run);
         return;
       }
       if (run.status === 'Failed') {
         answer.textContent = run.error || 'Explain failed.';
+        updateExplainActionButtons(run);
+        return;
+      }
+      if (run.status === 'Cancelled') {
+        answer.textContent = `Cancelled Explain run ${run.id}.`;
+        updateExplainActionButtons(run);
         return;
       }
       if (!run.answer) {
         answer.textContent = `${run.status} · no answer payload was returned.`;
+        updateExplainActionButtons(run);
         return;
       }
       renderExplainSection(answer, 'Summary', run.answer.summary);
       renderExplainSection(answer, 'Purpose', run.answer.purpose);
       renderExplainSection(answer, 'Change', run.answer.change);
       renderExplainSection(answer, `Risk (${run.answer.risk_level})`, run.answer.risk_reason);
+      updateExplainActionButtons(run);
+    }
+
+    function updateExplainActionButtons(run: ExplainHistoryItem | null) {
+      byId('retryExplain').toggleAttribute('disabled', !run || run.status === 'Running');
+      byId('cancelExplain').toggleAttribute('disabled', !run || run.status !== 'Running');
+    }
+
+    async function retryActiveExplain() {
+      if (activeExplainRunId === null) { setStatus('No active Explain run to retry.'); return; }
+      const run = await request<ExplainStartResponse>(`/api/explain/history/${activeExplainRunId}/retry`, { method: 'POST' });
+      activeExplainRunId = run.id;
+      explainHistory = await request<ExplainHistoryResponse>('/api/explain/history');
+      renderExplainHistory();
+      renderExplainRunAnswer(findExplainRun(run.id) || explainStartToHistory(run));
+      setStatus(`Retried Explain as run ${run.id}.`);
+    }
+
+    async function cancelActiveExplain() {
+      if (activeExplainRunId === null) { setStatus('No active Explain run to cancel.'); return; }
+      explainHistory = await request<ExplainHistoryResponse>(`/api/explain/history/${activeExplainRunId}/cancel`, { method: 'POST' });
+      renderExplainHistory();
+      renderExplainRunAnswer(findExplainRun(activeExplainRunId));
+      setStatus(`Cancelled Explain run ${activeExplainRunId}.`);
     }
 
     function renderExplainSection(parent: HTMLElement, title: string, text: string) {
@@ -657,6 +693,8 @@ let modelPickerMode: 'session' | 'default' = 'session';
     byId('chooseExplainModel').addEventListener('click', (event) => { event.preventDefault(); openModelPicker().catch(showError); });
     byId('openExplainHistory').addEventListener('click', (event) => { event.preventDefault(); openExplainHistory().catch(showError); });
     byId('requestExplain').addEventListener('click', (event) => { event.preventDefault(); requestExplainPreview(); });
+    byId('retryExplain').addEventListener('click', (event) => { event.preventDefault(); retryActiveExplain().catch(showError); });
+    byId('cancelExplain').addEventListener('click', (event) => { event.preventDefault(); cancelActiveExplain().catch(showError); });
     byId('openCommit').addEventListener('click', () => byId('commitDialog').showModal());
     byId('publishCurrent').addEventListener('click', () => byId('publishDialog').showModal());
     byId('submitPublish').addEventListener('click', (event) => { event.preventDefault(); publishCurrentBranch().catch(showError); });
@@ -724,6 +762,8 @@ let modelPickerMode: 'session' | 'default' = 'session';
       else if (event.key === 'o') openSessionPicker().catch(showError);
       else if (event.key === 'm') openModelPicker().catch(showError);
       else if (event.key === 'h') openExplainHistory().catch(showError);
+      else if (event.key === 't') retryActiveExplain().catch(showError);
+      else if (event.key === 'z') cancelActiveExplain().catch(showError);
       else if (event.key === 'r') mutate('/api/refresh', 'Refreshed review queue.').catch(showError);
       else if (event.key === 'c') byId('commitDialog').showModal();
       else if (event.key === 'p') byId('publishDialog').showModal();
