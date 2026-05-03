@@ -7,6 +7,7 @@ mod model_picker;
 mod publish;
 mod review_display;
 mod review_nav;
+mod session_picker;
 mod settings_panel;
 mod text_input;
 mod theme;
@@ -103,6 +104,9 @@ use self::review_nav::{
 };
 #[cfg(test)]
 use self::review_nav::{hunk_index_for_line, hunk_line_start, review_render_line_count};
+use self::session_picker::{
+    SessionUiState, draw_session_picker, handle_session_picker_key, open_session_picker,
+};
 #[cfg(test)]
 use self::settings_panel::settings_lines;
 use self::settings_panel::{draw_settings, handle_settings_key, open_settings, save_settings};
@@ -211,13 +215,6 @@ enum Message {
     Publish {
         result: Result<(), PushFailure>,
     },
-}
-
-#[derive(Default)]
-struct SessionUiState {
-    sessions: Vec<OpencodeSession>,
-    selected: Option<usize>,
-    cursor: usize,
 }
 
 #[derive(Default)]
@@ -927,37 +924,6 @@ async fn handle_explain_menu_key(app: &mut App, key: KeyEvent) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn handle_session_picker_key(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => {
-            close_explain_submenu(app, "Session picker closed.");
-        }
-        KeyCode::Up => {
-            app.session_state.cursor = app.session_state.cursor.saturating_sub(1);
-        }
-        _ if key_matches(app, key, KeybindingCommand::MoveUp) => {
-            app.session_state.cursor = app.session_state.cursor.saturating_sub(1);
-        }
-        KeyCode::Down if app.session_state.cursor + 1 < app.session_state.sessions.len() => {
-            app.session_state.cursor += 1;
-        }
-        _ if key_matches(app, key, KeybindingCommand::MoveDown)
-            && app.session_state.cursor + 1 < app.session_state.sessions.len() =>
-        {
-            app.session_state.cursor += 1;
-        }
-        KeyCode::Enter => {
-            app.session_state.selected = Some(app.session_state.cursor);
-            app.refresh_auto_model();
-            close_explain_submenu(app, "Choose a file or hunk, then run Explain.");
-            if let Some(session) = app.active_session() {
-                app.status = format!("Explain will use context source {}.", session.title);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn handle_keybinding_picker_key(app: &mut App, key: KeyEvent) {
@@ -2507,74 +2473,6 @@ fn next_non_whitespace_char(chars: &[char], mut index: usize) -> Option<char> {
     None
 }
 
-fn draw_session_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let modal = centered_rect(58, 42, area);
-    frame.render_widget(Clear, modal);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(styles::surface_raised())),
-        modal,
-    );
-    let inner = modal.inner(ratatui::layout::Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(2)])
-        .split(inner);
-    let items = app
-        .session_state
-        .sessions
-        .iter()
-        .enumerate()
-        .map(|(index, session)| {
-            let style = if index == app.session_state.cursor {
-                Style::default()
-                    .fg(styles::text_primary())
-                    .bg(styles::accent_dim())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(styles::text_muted())
-            };
-            let marker = if app.session_state.selected == Some(index) {
-                "[✓]"
-            } else {
-                "[ ]"
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!(" {marker} "), style),
-                Span::styled(session.title.clone(), style),
-            ]))
-        })
-        .collect::<Vec<_>>();
-    let mut state = ListState::default().with_selected(Some(app.session_state.cursor));
-    frame.render_stateful_widget(
-        List::new(items).block(
-            Block::default()
-                .title(Line::from(Span::styled(
-                    "Choose context source",
-                    styles::title(),
-                )))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(styles::accent_bright_color()))
-                .style(Style::default().bg(styles::surface_raised())),
-        ),
-        sections[0],
-        &mut state,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Enter", styles::keybind()),
-            Span::styled(" select", styles::muted()),
-            Span::raw("  "),
-            Span::styled("Esc", styles::keybind()),
-            Span::styled(" close", styles::muted()),
-        ]))
-        .style(Style::default().bg(styles::surface_raised())),
-        sections[1],
-    );
-}
-
 fn draw_keybinding_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let modal = centered_rect(62, 58, area);
     frame.render_widget(Clear, modal);
@@ -2686,19 +2584,6 @@ fn open_explain_menu(app: &mut App) {
     app.overlay = Overlay::ExplainMenu;
     app.why_this.return_to_menu = true;
     app.status = "Choose a file or hunk, then run Explain.".to_string();
-}
-
-fn open_session_picker(app: &mut App) {
-    if app.session_state.sessions.is_empty() {
-        app.status = "No opencode sessions were found for this repository.".to_string();
-        return;
-    }
-
-    if let Some(selected) = app.session_state.selected {
-        app.session_state.cursor = selected;
-    }
-    app.overlay = Overlay::SessionPicker;
-    app.status = "Choose the context source for Explain.".to_string();
 }
 
 fn close_explain_submenu(app: &mut App, status: &str) {
