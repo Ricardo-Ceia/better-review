@@ -3,6 +3,7 @@ mod github_token;
 mod keybindings;
 mod model_picker;
 mod publish;
+mod review_display;
 mod review_nav;
 mod settings_panel;
 mod text_input;
@@ -72,6 +73,16 @@ use self::model_picker::{
     why_model_display_label,
 };
 use self::publish::{draw_publish_prompt, handle_publish_prompt_key, handle_publish_result};
+use self::review_display::{
+    apply_bg_to_spans, diff_change_bar_color, diff_change_bar_for, diff_change_bar_style_for,
+    diff_content_style, diff_line_bg, diff_marker_style_for, diff_row_style_for,
+    line_number_style_for, review_marker, sidebar_file_label_parts, truncate_path,
+};
+#[cfg(test)]
+use self::review_display::{
+    diff_change_bar, diff_change_bar_style, diff_current_line_bg, diff_marker_style, diff_row_bg,
+    line_number_style,
+};
 use self::review_nav::{
     ReviewFocus, ReviewUiState, current_why_target, move_review_cursor_by_line,
     sync_cursor_line_to_hunk,
@@ -2379,41 +2390,6 @@ fn append_footer_key(spans: &mut Vec<Span<'static>>, key: &str, label: &str) {
     ));
 }
 
-fn sidebar_file_label_parts(file: &FileDiff) -> (String, String, String) {
-    match file.status {
-        FileStatus::Renamed | FileStatus::Copied | FileStatus::ModeChanged => {
-            ("• ".to_string(), String::new(), file.display_label())
-        }
-        _ => tree_sidebar_parts(file.display_path()),
-    }
-}
-
-fn tree_sidebar_parts(path: &str) -> (String, String, String) {
-    let mut parts = path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-
-    if parts.is_empty() {
-        return ("• ".to_string(), String::new(), path.to_string());
-    }
-
-    let leaf = parts.pop().unwrap_or_default().to_string();
-    let depth = parts.len();
-    let tree_prefix = if depth == 0 {
-        "• ".to_string()
-    } else {
-        format!("{}└─ ", "  ".repeat(depth.saturating_sub(1)))
-    };
-    let parent = if parts.is_empty() {
-        String::new()
-    } else {
-        format!("{}/", parts.join("/"))
-    };
-
-    (tree_prefix, parent, leaf)
-}
-
 const DIFF_SYNTAX_KEYWORDS: &[&str] = &[
     "as", "async", "await", "break", "const", "continue", "else", "enum", "extern", "fn", "for",
     "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "return", "self",
@@ -3412,148 +3388,6 @@ fn draw_commit_prompt(
     );
 }
 
-#[cfg(test)]
-fn line_number_style(kind: DiffLineKind) -> Style {
-    line_number_style_for(kind, false)
-}
-
-fn line_number_style_for(kind: DiffLineKind, is_current_line: bool) -> Style {
-    match kind {
-        DiffLineKind::Add | DiffLineKind::Remove => Style::default()
-            .fg(diff_change_bar_color(kind))
-            .bg(if is_current_line {
-                diff_line_bg(kind, true)
-            } else {
-                styles::surface_raised()
-            }),
-        DiffLineKind::Context => styles::subtle().bg(if is_current_line {
-            diff_line_bg(kind, true)
-        } else {
-            styles::surface_raised()
-        }),
-    }
-}
-
-#[cfg(test)]
-fn diff_change_bar(kind: DiffLineKind) -> &'static str {
-    diff_change_bar_for(kind, false)
-}
-
-fn diff_change_bar_for(kind: DiffLineKind, is_current_hunk: bool) -> &'static str {
-    match kind {
-        DiffLineKind::Add | DiffLineKind::Remove => "▌",
-        DiffLineKind::Context if is_current_hunk => "▌",
-        DiffLineKind::Context => " ",
-    }
-}
-
-#[cfg(test)]
-fn diff_change_bar_style(kind: DiffLineKind) -> Style {
-    diff_change_bar_style_for(kind, false, false)
-}
-
-fn diff_change_bar_style_for(
-    kind: DiffLineKind,
-    is_current_hunk: bool,
-    is_current_line: bool,
-) -> Style {
-    let bg = diff_line_bg(kind, is_current_line);
-    match kind {
-        DiffLineKind::Add | DiffLineKind::Remove => Style::default()
-            .fg(diff_change_bar_color(kind))
-            .bg(bg)
-            .add_modifier(Modifier::BOLD),
-        DiffLineKind::Context if is_current_hunk => Style::default()
-            .fg(styles::accent_bright_color())
-            .bg(bg)
-            .add_modifier(Modifier::BOLD),
-        DiffLineKind::Context => Style::default().fg(bg).bg(bg),
-    }
-}
-
-fn diff_change_bar_color(kind: DiffLineKind) -> Color {
-    match kind {
-        DiffLineKind::Add => Color::Indexed(40),
-        DiffLineKind::Remove => Color::Indexed(160),
-        DiffLineKind::Context => styles::border_muted(),
-    }
-}
-
-fn diff_row_bg(kind: DiffLineKind) -> Color {
-    match kind {
-        DiffLineKind::Add => Color::Indexed(22),
-        DiffLineKind::Remove => Color::Indexed(52),
-        DiffLineKind::Context => styles::surface(),
-    }
-}
-
-fn diff_current_line_bg(kind: DiffLineKind) -> Color {
-    match kind {
-        DiffLineKind::Add => Color::Indexed(28),
-        DiffLineKind::Remove => Color::Indexed(88),
-        DiffLineKind::Context => styles::accent_dim(),
-    }
-}
-
-fn diff_line_bg(kind: DiffLineKind, is_current_line: bool) -> Color {
-    if is_current_line {
-        diff_current_line_bg(kind)
-    } else {
-        diff_row_bg(kind)
-    }
-}
-
-#[cfg(test)]
-fn diff_marker_style(kind: DiffLineKind) -> Style {
-    diff_marker_style_for(kind, false)
-}
-
-fn diff_marker_style_for(kind: DiffLineKind, is_current_line: bool) -> Style {
-    match kind {
-        DiffLineKind::Add | DiffLineKind::Remove => Style::default()
-            .fg(diff_change_bar_color(kind))
-            .bg(diff_line_bg(kind, is_current_line))
-            .add_modifier(Modifier::BOLD),
-        DiffLineKind::Context => Style::default()
-            .fg(styles::text_muted())
-            .bg(diff_line_bg(kind, is_current_line)),
-    }
-}
-
-fn diff_content_style(kind: DiffLineKind) -> Style {
-    match kind {
-        DiffLineKind::Add => Style::default()
-            .fg(styles::syntax_string())
-            .bg(diff_row_bg(kind)),
-        DiffLineKind::Remove => Style::default()
-            .fg(styles::text_primary())
-            .bg(diff_row_bg(kind)),
-        DiffLineKind::Context => Style::default()
-            .fg(styles::text_muted())
-            .bg(diff_row_bg(kind)),
-    }
-}
-
-fn diff_row_style_for(kind: DiffLineKind, is_current_line: bool) -> Style {
-    match kind {
-        DiffLineKind::Add => Style::default()
-            .fg(styles::syntax_string())
-            .bg(diff_line_bg(kind, is_current_line)),
-        DiffLineKind::Remove => Style::default()
-            .fg(styles::text_primary())
-            .bg(diff_line_bg(kind, is_current_line)),
-        DiffLineKind::Context => Style::default()
-            .fg(styles::text_muted())
-            .bg(diff_line_bg(kind, is_current_line)),
-    }
-}
-
-fn apply_bg_to_spans(spans: &mut [Span<'static>], bg: Color) {
-    for span in spans {
-        span.style = span.style.bg(bg);
-    }
-}
-
 fn explain_context_source_line(app: &App) -> String {
     app.active_session()
         .map(|session| format!("context: {} ({})", session.title, session.id))
@@ -3600,26 +3434,6 @@ fn render_why_section(label: &str, label_style: Style, body: &str) -> Vec<Line<'
     }
     lines.push(Line::from(Span::raw("")));
     lines
-}
-
-fn review_marker(
-    status: ReviewStatus,
-    file_status: crate::domain::diff::FileStatus,
-    is_hunk: bool,
-) -> &'static str {
-    match status {
-        ReviewStatus::Accepted => "[✓]",
-        ReviewStatus::Rejected => "[x]",
-        ReviewStatus::Unreviewed if is_hunk => "[ ]",
-        ReviewStatus::Unreviewed => match file_status {
-            crate::domain::diff::FileStatus::Added => "[+]",
-            crate::domain::diff::FileStatus::Deleted => "[-]",
-            crate::domain::diff::FileStatus::Renamed => "[→]",
-            crate::domain::diff::FileStatus::Copied => "[⧉]",
-            crate::domain::diff::FileStatus::ModeChanged => "[m]",
-            crate::domain::diff::FileStatus::Modified => "[ ]",
-        },
-    }
 }
 
 fn render_brand_lockup(frame: &mut ratatui::Frame, area: Rect, app: &App, alignment: Alignment) {
@@ -3671,18 +3485,6 @@ fn render_brand_lockup(frame: &mut ratatui::Frame, area: Rect, app: &App, alignm
             )
             .render(word_area, frame.buffer_mut());
     }
-}
-
-fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.chars().count() <= max_len {
-        return path.to_string();
-    }
-    let suffix = path
-        .chars()
-        .rev()
-        .take(max_len.saturating_sub(3))
-        .collect::<String>();
-    format!("...{}", suffix.chars().rev().collect::<String>())
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
